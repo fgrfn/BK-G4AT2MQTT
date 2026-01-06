@@ -626,7 +626,7 @@ const char* htmlPage = R"rawliteral(
     <div id="dashboard" class="page active">
       <div class="card">
         <div class="value-display">
-          <div class="label">Aktueller Verbrauch</div>
+          <div class="label">Aktueller Zählerstand</div>
           <div class="value" id="gasValue">-- m³</div>
         </div>
       </div>
