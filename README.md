@@ -1,7 +1,7 @@
 # 🏭 BK-G4AT2MQTT - ESP32 Gaszähler Gateway
 
 > **Original Projekt von [BennoB666](https://github.com/BennoB666/BK-G4AT2MQTT)**  
-> Dieser Fork wurde massiv erweitert mit professioneller WebUI, Live-Monitoring und umfangreichen Features.
+> Dieser Fork wurde massiv erweitert mit WebUI, Live-Monitoring und umfangreichen Features.
 
 Ein leistungsstarkes ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines **Honeywell BK-G4AT Gaszählers** mit vollständiger MQTT Integration und moderner Web-Oberfläche.
 
