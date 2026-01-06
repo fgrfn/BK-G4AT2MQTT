@@ -4,14 +4,18 @@
 #include <ArduinoOTA.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <ESPmDNS.h>
 #include <time.h>
 #include <vector>
 
 // ---- Konfiguration ----
 char ssid[32] = "SSID";
 char password[64] = "Password";
+char hostname[32] = "ESP32-GasZaehler"; // mDNS Hostname
 char mqtt_server[64] = "192.168.178.1"; // MQTT Broker IP
 int mqtt_port = 1883;
+char mqtt_user[64] = ""; // MQTT Username (optional)
+char mqtt_pass[64] = ""; // MQTT Password (optional)
 char mqtt_topic[64] = "gaszaehler/verbrauch";
 char mqtt_availability_topic[64] = "gaszaehler/availability";
 char mqtt_client_id[32] = "ESP32GasClient";
@@ -23,7 +27,7 @@ bool haDiscoverySent = false;
 // ---- WiFi AP Mode ----
 bool apMode = false;
 const char* ap_ssid = "ESP32-GasZaehler";
-const char* ap_password = "12345678"; // Mindestens 8 Zeichen
+const char* ap_password = ""; // Mindestens 8 Zeichen
 const unsigned long AP_MODE_TIMEOUT = 300000; // 5 Minuten im AP-Modus
 
 // ---- Status LED ----
@@ -31,11 +35,44 @@ const int STATUS_LED_PIN = 2; // Onboard LED (GPIO2)
 unsigned long lastLedBlink = 0;
 bool ledState = false;
 
+// ---- Config Reset Button ----
+const int RESET_BUTTON_PIN = 0; // BOOT Button (GPIO0)
+
 // ---- NTP Zeitserver ----
-const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 3600; // UTC+1
-const int daylightOffset_sec = 3600; // Sommerzeit
+const char* ntpServer = "de.pool.ntp.org";
+const long gmtOffset_sec = 3600; // UTC+1 (MEZ)
+const int daylightOffset_sec = 3600; // Automatisch erkannt
 bool timeInitialized = false;
+
+// Automatische Sommerzeit-Erkennung für Europa
+bool isDST(time_t now) {
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);
+  int month = timeinfo.tm_mon + 1;
+  int day = timeinfo.tm_mday;
+  int dow = timeinfo.tm_wday; // 0=Sonntag
+  
+  // Oktober bis März: Winterzeit
+  if (month < 3 || month > 10) return false;
+  // April bis September: Sommerzeit
+  if (month > 3 && month < 10) return true;
+  
+  // März: Sommerzeit ab letztem Sonntag 2 Uhr
+  if (month == 3) {
+    int lastSunday = day - dow;
+    while (lastSunday + 7 <= 31) lastSunday += 7;
+    return day >= lastSunday;
+  }
+  
+  // Oktober: Winterzeit ab letztem Sonntag 3 Uhr
+  if (month == 10) {
+    int lastSunday = day - dow;
+    while (lastSunday + 7 <= 31) lastSunday += 7;
+    return day < lastSunday;
+  }
+  
+  return false;
+}
 
 // ---- Error Tracking ----
 struct ErrorStats {
@@ -47,6 +84,38 @@ struct ErrorStats {
   char lastErrorMsg[64] = "";
 };
 ErrorStats errorStats;
+
+// ---- M-Bus Statistics ----
+struct MBusStats {
+  unsigned long totalPolls = 0;
+  unsigned long successfulPolls = 0;
+  unsigned long totalResponseTime = 0;
+  unsigned long lastResponseTime = 0;
+  String lastHexDump = "";
+};
+MBusStats mbusStats;
+
+// ---- Live Log System ----
+const int MAX_LOG_ENTRIES = 50;
+struct LogEntry {
+  unsigned long timestamp;
+  String message;
+};
+std::vector<LogEntry> logBuffer;
+
+void addLog(const String& msg) {
+  LogEntry entry;
+  entry.timestamp = millis();
+  entry.message = msg;
+  logBuffer.push_back(entry);
+  
+  // Ringbuffer: alte Einträge löschen
+  if (logBuffer.size() > MAX_LOG_ENTRIES) {
+    logBuffer.erase(logBuffer.begin());
+  }
+  
+  Serial.println("[" + String(millis()/1000) + "s] " + msg);
+}
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -71,7 +140,6 @@ const long MBUS_BAUD = 2400;
 enum MBusState { MBUS_IDLE, MBUS_WAIT_RESPONSE };
 MBusState mbusState = MBUS_IDLE;
 unsigned long mbusLastAction = 0;
-const unsigned long MBUS_POLL_INTERVAL = 60000; // 60 Sekunden
 const unsigned long MBUS_RESPONSE_TIMEOUT = 500; // ms
 
 uint8_t mbusBuffer[256];
@@ -80,34 +148,61 @@ size_t mbusLen = 0;
 // ---- Konfiguration laden/speichern ----
 void loadConfig() {
   preferences.begin("gas-config", false);
+  
+  // Prüfen ob bereits konfiguriert wurde (config_done Flag)
+  bool configDone = preferences.getBool("config_done", false);
+  
   preferences.getString("ssid", ssid, sizeof(ssid));
   preferences.getString("password", password, sizeof(password));
+  preferences.getString("hostname", hostname, sizeof(hostname));
   preferences.getString("mqtt_server", mqtt_server, sizeof(mqtt_server));
   mqtt_port = preferences.getInt("mqtt_port", 1883);
+  preferences.getString("mqtt_user", mqtt_user, sizeof(mqtt_user));
+  preferences.getString("mqtt_pass", mqtt_pass, sizeof(mqtt_pass));
   preferences.getString("mqtt_topic", mqtt_topic, sizeof(mqtt_topic));
   poll_interval = preferences.getULong("poll_interval", 60000);
   preferences.end();
   
+  // Validierung: Poll-Intervall muss zwischen 10s und 1h liegen
+  if (poll_interval < 10000) poll_interval = 10000; // Minimum 10s
+  if (poll_interval > 3600000) poll_interval = 3600000; // Maximum 1h
+  
+  // Wenn noch nie konfiguriert oder SSID leer -> Defaults setzen
+  if (!configDone || strlen(ssid) == 0) {
+    Serial.println("Keine gültige Konfiguration gefunden - verwende Defaults");
+    strcpy(ssid, "SSID");
+    strcpy(password, "Password");
+  }
+  
   // Fallback auf Defaults wenn leer
-  if (strlen(ssid) == 0) strcpy(ssid, "SSID");
+  if (strlen(hostname) == 0) strcpy(hostname, "ESP32-GasZaehler");
   if (strlen(mqtt_server) == 0) strcpy(mqtt_server, "192.168.178.1");
   if (strlen(mqtt_topic) == 0) strcpy(mqtt_topic, "gaszaehler/verbrauch");
-  if (poll_interval < 10000) poll_interval = 60000; // Minimum 10 Sekunden
   
   // Availability Topic generieren
   snprintf(mqtt_availability_topic, sizeof(mqtt_availability_topic), "%s_availability", mqtt_topic);
 }
 
 void saveConfig() {
+  // Validierung vor dem Speichern
+  if (poll_interval < 10000) poll_interval = 10000;
+  if (poll_interval > 3600000) poll_interval = 3600000;
+  
   preferences.begin("gas-config", false);
   preferences.putString("ssid", ssid);
   preferences.putString("password", password);
+  preferences.putString("hostname", hostname);
   preferences.putString("mqtt_server", mqtt_server);
   preferences.putInt("mqtt_port", mqtt_port);
+  preferences.putString("mqtt_user", mqtt_user);
+  preferences.putString("mqtt_pass", mqtt_pass);
   preferences.putString("mqtt_topic", mqtt_topic);
   preferences.putULong("poll_interval", poll_interval);
+  preferences.putBool("config_done", true); // Markiere als konfiguriert
   preferences.end();
+  
   Serial.println("Konfiguration gespeichert");
+  Serial.println("Poll-Intervall: " + String(poll_interval / 1000) + "s (" + String(poll_interval) + "ms)");
 }
 
 // ---- Fehler loggen ----
@@ -154,6 +249,9 @@ void updateStatusLED() {
   }
 }
 
+// ---- Forward declarations ----
+void startAPMode();
+
 // ---- WLAN Setup ----
 void setup_wifi() {
   // Wenn SSID "SSID" ist, direkt in AP-Modus gehen
@@ -164,6 +262,7 @@ void setup_wifi() {
   }
   
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(hostname);
   WiFi.begin(ssid, password);
   Serial.print("Verbinde mit WLAN: ");
   Serial.println(ssid);
@@ -211,27 +310,43 @@ void startAPMode() {
 
 // ---- MQTT Reconnect ----
 void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Verbinde zu MQTT Broker: ");
-    Serial.print(mqtt_server);
-    Serial.print(":");
-    Serial.println(mqtt_port);
+  static unsigned long lastAttempt = 0;
+  unsigned long now = millis();
+  
+  // Nur alle 5 Sekunden versuchen
+  if (now - lastAttempt < 5000) {
+    return;
+  }
+  
+  lastAttempt = now;
+  
+  if (!client.connected()) {
+    String authInfo = (strlen(mqtt_user) > 0) ? " (Auth: " + String(mqtt_user) + ")" : " (ohne Auth)";
+    addLog("MQTT: Verbinde zu " + String(mqtt_server) + ":" + String(mqtt_port) + authInfo);
     
     // Last Will Testament für automatische Offline-Erkennung
-    if (client.connect(mqtt_client_id, mqtt_availability_topic, 1, true, "offline")) {
-      Serial.println("MQTT verbunden");
+    bool connected = false;
+    if (strlen(mqtt_user) > 0) {
+      // Mit Authentifizierung
+      connected = client.connect(mqtt_client_id, mqtt_user, mqtt_pass, mqtt_availability_topic, 1, true, "offline");
+    } else {
+      // Ohne Authentifizierung
+      connected = client.connect(mqtt_client_id, mqtt_availability_topic, 1, true, "offline");
+    }
+    
+    if (connected) {
+      addLog("MQTT: Verbunden!");
       
       // Online Status senden
       client.publish(mqtt_availability_topic, "online", true);
       
       haDiscoverySent = false; // Discovery neu senden nach Reconnect
     } else {
-      Serial.print("Fehler, rc=");
-      Serial.print(client.state());
-      Serial.println(" -> Neuer Versuch in 5 Sekunden");
+      String errMsg = "MQTT: Fehler rc=" + String(client.state());
+      if (client.state() == 5) errMsg += " (Authentifizierung fehlgeschlagen)";
+      addLog(errMsg);
       errorStats.mqttErrors++;
       logError("MQTT Verbindung fehlgeschlagen");
-      delay(5000);
     }
   }
 }
@@ -240,33 +355,30 @@ void reconnect() {
 void sendHomeAssistantDiscovery() {
   if (haDiscoverySent) return;
   
-  String discoveryTopic = "homeassistant/sensor/gaszaehler/config";
-  String payload = "{";
-  payload += "\"name\":\"Gaszähler\",";
-  payload += "\"state_topic\":\"" + String(mqtt_topic) + "\",";
-  payload += "\"availability_topic\":\"" + String(mqtt_availability_topic) + "\",";
-  payload += "\"unit_of_measurement\":\"m³\",";
-  payload += "\"device_class\":\"gas\",";
-  payload += "\"state_class\":\"total_increasing\",";
-  payload += "\"value_template\":\"{{ value }}\",";
-  payload += "\"unique_id\":\"esp32_gas_meter\",";
-  payload += "\"device\":{";
-  payload += "\"identifiers\":[\"esp32_gas_meter\"],";
-  payload += "\"name\":\"ESP32 Gaszähler\",";
-  payload += "\"model\":\"BK-G4 M-Bus Gateway\",";
-  payload += "\"manufacturer\":\"ESP32\",";
-  payload += "\"sw_version\":\"1.0\",";
-  payload += "\"configuration_url\":\"http://" + WiFi.localIP().toString() + "\"";
-  payload += "}";
-  payload += "}";
+  String baseDevice = "{\"identifiers\":[\"esp32_gas_meter\"],\"name\":\"ESP32 Gaszähler\",\"model\":\"BK-G4 M-Bus Gateway\",\"manufacturer\":\"ESP32\",\"sw_version\":\"1.2\",\"configuration_url\":\"http://" + WiFi.localIP().toString() + "\"}";
   
-  if (client.publish(discoveryTopic.c_str(), payload.c_str(), true)) {
-    Serial.println("Home Assistant Discovery gesendet");
-    haDiscoverySent = true;
-  } else {
-    Serial.println("Fehler beim Senden der Discovery");
-    logError("HA Discovery fehlgeschlagen");
-  }
+  // 1. Gas Volume Sensor (Main) - Energy Dashboard Ready
+  String topic1 = "homeassistant/sensor/gaszaehler_volume/config";
+  String payload1 = "{\"name\":\"Gasverbrauch\",\"state_topic\":\"" + String(mqtt_topic) + "\",\"availability_topic\":\"" + String(mqtt_availability_topic) + "\",\"unit_of_measurement\":\"m³\",\"device_class\":\"gas\",\"state_class\":\"total_increasing\",\"last_reset_value_template\":\"1970-01-01T00:00:00+00:00\",\"value_template\":\"{{ value | float }}\",\"suggested_display_precision\":2,\"unique_id\":\"esp32_gas_volume\",\"device\":" + baseDevice + "}";
+  client.publish(topic1.c_str(), payload1.c_str(), true);
+  
+  // 2. WiFi Signal Sensor
+  String topic2 = "homeassistant/sensor/gaszaehler_wifi/config";
+  String payload2 = "{\"name\":\"Gaszähler WiFi Signal\",\"state_topic\":\"" + String(mqtt_topic) + "_wifi\",\"availability_topic\":\"" + String(mqtt_availability_topic) + "\",\"unit_of_measurement\":\"dBm\",\"device_class\":\"signal_strength\",\"value_template\":\"{{ value }}\",\"unique_id\":\"esp32_gas_wifi\",\"device\":" + baseDevice + "}";
+  client.publish(topic2.c_str(), payload2.c_str(), true);
+  
+  // 3. M-Bus Success Rate Sensor
+  String topic3 = "homeassistant/sensor/gaszaehler_mbus_rate/config";
+  String payload3 = "{\"name\":\"Gaszähler M-Bus Success Rate\",\"state_topic\":\"" + String(mqtt_topic) + "_mbus_rate\",\"availability_topic\":\"" + String(mqtt_availability_topic) + "\",\"unit_of_measurement\":\"%\",\"value_template\":\"{{ value }}\",\"unique_id\":\"esp32_gas_mbus_rate\",\"icon\":\"mdi:check-network\",\"device\":" + baseDevice + "}";
+  client.publish(topic3.c_str(), payload3.c_str(), true);
+  
+  // 4. Binary Sensor for Connectivity
+  String topic4 = "homeassistant/binary_sensor/gaszaehler_connected/config";
+  String payload4 = "{\"name\":\"Gaszähler Online\",\"state_topic\":\"" + String(mqtt_availability_topic) + "\",\"payload_on\":\"online\",\"payload_off\":\"offline\",\"device_class\":\"connectivity\",\"unique_id\":\"esp32_gas_connected\",\"device\":" + baseDevice + "}";
+  client.publish(topic4.c_str(), payload4.c_str(), true);
+  
+  Serial.println("Home Assistant Discovery gesendet (4 Entities)");
+  haDiscoverySent = true;
 }
 
 // ---- BCD Parser für Gaszähler ----
@@ -412,10 +524,24 @@ const char* htmlPage = R"rawliteral(
       height: 300px;
       margin-top: 20px;
       position: relative;
+      cursor: crosshair;
     }
     .chart {
       width: 100%;
       height: 100%;
+      touch-action: pan-x pinch-zoom;
+    }
+    .chart-tooltip {
+      position: absolute;
+      background: rgba(0,0,0,0.8);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.85em;
+      pointer-events: none;
+      display: none;
+      z-index: 1000;
+      white-space: nowrap;
     }
     .form-group {
       margin-bottom: 20px;
@@ -494,6 +620,7 @@ const char* htmlPage = R"rawliteral(
     <div class="nav">
       <button onclick="showPage('dashboard')" class="active" id="navDashboard">Dashboard</button>
       <button onclick="showPage('config')" id="navConfig">Konfiguration</button>
+      <button onclick="showPage('logs')" id="navLogs">Live Logs</button>
     </div>
 
     <div id="dashboard" class="page active">
@@ -531,6 +658,40 @@ const char* htmlPage = R"rawliteral(
             <div class="label">Status-LED</div>
             <div class="value">GPIO2</div>
           </div>
+          <div class="status-item" id="wifiSignal">
+            <div class="label">WLAN Signal</div>
+            <div class="value">--</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>System-Informationen</h2>
+        <div class="status-grid">
+          <div class="status-item">
+            <div class="label">Freier Heap</div>
+            <div class="value" id="freeHeap">--</div>
+          </div>
+          <div class="status-item">
+            <div class="label">Heap-Größe</div>
+            <div class="value" id="heapSize">--</div>
+          </div>
+          <div class="status-item">
+            <div class="label">Flash-Größe</div>
+            <div class="value" id="flashSize">--</div>
+          </div>
+          <div class="status-item">
+            <div class="label">Sketch-Größe</div>
+            <div class="value" id="sketchSize">--</div>
+          </div>
+          <div class="status-item">
+            <div class="label">Freier Flash</div>
+            <div class="value" id="freeFlash">--</div>
+          </div>
+          <div class="status-item">
+            <div class="label">Chip-Modell</div>
+            <div class="value" id="chipModel">--</div>
+          </div>
         </div>
       </div>
 
@@ -560,9 +721,18 @@ const char* htmlPage = R"rawliteral(
       </div>
 
       <div class="card">
-        <h2>Verlauf</h2>
-        <div class="chart-container">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+          <h2 style="margin: 0;">Verlauf</h2>
+          <div style="display: flex; gap: 5px;">
+            <button onclick="setTimeRange(24)" class="btn" id="btn24h" style="padding: 5px 12px; font-size: 0.9em; background: #667eea;">24h</button>
+            <button onclick="setTimeRange(168)" class="btn" id="btn7d" style="padding: 5px 12px; font-size: 0.9em; background: white; color: #667eea;">7d</button>
+            <button onclick="setTimeRange(720)" class="btn" id="btn30d" style="padding: 5px 12px; font-size: 0.9em; background: white; color: #667eea;">30d</button>
+            <button onclick="setTimeRange(0)" class="btn" id="btnAll" style="padding: 5px 12px; font-size: 0.9em; background: white; color: #667eea;">Alle</button>
+          </div>
+        </div>
+        <div class="chart-container" id="chartContainer">
           <canvas id="chart" class="chart"></canvas>
+          <div id="chartTooltip" class="chart-tooltip"></div>
         </div>
       </div>
     </div>
@@ -575,11 +745,22 @@ const char* htmlPage = R"rawliteral(
           <h3>WLAN</h3>
           <div class="form-group">
             <label>SSID</label>
-            <input type="text" id="ssid" name="ssid" required>
+            <div style="display: flex; gap: 10px; align-items: start;">
+              <input type="text" id="ssid" name="ssid" required style="flex: 1;">
+              <button type="button" onclick="scanWifi()" class="btn" style="padding: 10px 20px; white-space: nowrap;">Scannen</button>
+            </div>
+            <select id="wifiList" onchange="selectWifi()" style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px; margin-top: 10px; display: none;">
+              <option value="">-- Netzwerk auswählen --</option>
+            </select>
           </div>
           <div class="form-group">
             <label>Passwort</label>
             <input type="password" id="password" name="password">
+          </div>
+          <div class="form-group">
+            <label>Hostname</label>
+            <input type="text" id="hostname" name="hostname" required>
+            <small style="color: #666;">Für mDNS (z.B. ESP32-GasZaehler.local)</small>
           </div>
           
           <h3 style="margin-top: 30px;">MQTT</h3>
@@ -590,6 +771,15 @@ const char* htmlPage = R"rawliteral(
           <div class="form-group">
             <label>Port</label>
             <input type="number" id="mqtt_port" name="mqtt_port" required>
+          </div>
+          <div class="form-group">
+            <label>Benutzername (optional)</label>
+            <input type="text" id="mqtt_user" name="mqtt_user">
+            <small style="color: #666;">Leer lassen wenn keine Authentifizierung</small>
+          </div>
+          <div class="form-group">
+            <label>Passwort (optional)</label>
+            <input type="password" id="mqtt_pass" name="mqtt_pass">
           </div>
           <div class="form-group">
             <label>Topic</label>
@@ -607,11 +797,29 @@ const char* htmlPage = R"rawliteral(
         </form>
       </div>
     </div>
+
+    <div id="logs" class="page">
+      <div class="card">
+        <h2>Live Logs</h2>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+          <span style="color: #666;">Zeigt die letzten 50 Log-Einträge</span>
+          <button onclick="refreshLogs()" class="btn" style="padding: 8px 16px;">Aktualisieren</button>
+        </div>
+        <div id="logContainer" style="background: #f8f9fa; border-radius: 8px; padding: 15px; max-height: 600px; overflow-y: auto; font-family: monospace; font-size: 0.9em;">
+          <div style="text-align: center; color: #999;">Lade Logs...</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
     let currentPage = 'dashboard';
     let updateInterval = null;
+    let timeRangeHours = 24;
+    let fullHistoryData = [];
+    let chartZoom = 1.0;
+    let chartOffsetX = 0;
+    let lastChartData = [];
 
     function showPage(page) {
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -626,6 +834,10 @@ const char* htmlPage = R"rawliteral(
       } else {
         if (updateInterval) clearInterval(updateInterval);
         if (page === 'config') loadConfig();
+        if (page === 'logs') {
+          refreshLogs();
+          updateInterval = setInterval(refreshLogs, 3000);
+        }
       }
     }
 
@@ -651,6 +863,39 @@ const char* htmlPage = R"rawliteral(
             wifiDiv.className = data.wifiConnected ? 'status-item status-online' : 'status-item status-offline';
           }
           
+          // WiFi Signal Strength
+          const signalDiv = document.getElementById('wifiSignal');
+          if (data.wifiConnected && !data.apMode) {
+            const rssi = data.wifiRSSI;
+            let quality = 'Schlecht';
+            let color = '#dc3545';
+            let bars = '▂░░░';
+            
+            if (rssi >= -50) {
+              quality = 'Ausgezeichnet';
+              color = '#28a745';
+              bars = '▂▄▆█';
+            } else if (rssi >= -60) {
+              quality = 'Gut';
+              color = '#28a745';
+              bars = '▂▄▆░';
+            } else if (rssi >= -70) {
+              quality = 'Mittel';
+              color = '#ffc107';
+              bars = '▂▄░░';
+            } else if (rssi >= -80) {
+              quality = 'Schwach';
+              color = '#ff9800';
+              bars = '▂░░░';
+            }
+            
+            signalDiv.querySelector('.value').textContent = bars + ' ' + rssi + ' dBm (' + quality + ')';
+            signalDiv.style.borderLeftColor = color;
+          } else {
+            signalDiv.querySelector('.value').textContent = '--';
+            signalDiv.style.borderLeftColor = '#667eea';
+          }
+          
           const mqttDiv = document.getElementById('mqttStatus');
           mqttDiv.querySelector('.value').textContent = data.mqttConnected ? 'Verbunden' : 'Getrennt';
           mqttDiv.className = data.mqttConnected ? 'status-item status-online' : 'status-item status-offline';
@@ -668,19 +913,44 @@ const char* htmlPage = R"rawliteral(
           
           document.getElementById('pollInterval').textContent = data.pollInterval + 's';
           
+          // System Info
+          if (data.system) {
+            document.getElementById('freeHeap').textContent = (data.system.freeHeap / 1024).toFixed(1) + ' KB';
+            document.getElementById('heapSize').textContent = (data.system.heapSize / 1024).toFixed(1) + ' KB';
+            document.getElementById('flashSize').textContent = (data.system.flashSize / 1024 / 1024).toFixed(1) + ' MB';
+            document.getElementById('sketchSize').textContent = (data.system.sketchSize / 1024).toFixed(1) + ' KB';
+            document.getElementById('freeFlash').textContent = (data.system.freeSketch / 1024).toFixed(1) + ' KB';
+            document.getElementById('chipModel').textContent = data.system.chipModel + ' (' + data.system.chipCores + ' Cores @ ' + data.system.cpuFreq + 'MHz)';
+          }
+          
           // Error Stats
           document.getElementById('errMbusTimeout').textContent = data.errors.mbusTimeouts;
           document.getElementById('errMbusParse').textContent = data.errors.mbusParseErrors;
           document.getElementById('errMqtt').textContent = data.errors.mqttErrors;
           document.getElementById('errWifi').textContent = data.errors.wifiDisconnects;
           
-          if (data.errors.lastError) {
+          // Letzter Fehler nur anzeigen wenn:
+          // 1. Es einen Fehler gibt UND
+          // 2. Der Fehler nicht älter als 5 Minuten ist UND
+          // 3. Es tatsächlich Fehler gibt (Counter > 0)
+          const totalErrors = data.errors.mbusTimeouts + data.errors.mbusParseErrors + 
+                             data.errors.mqttErrors + data.errors.wifiDisconnects;
+          const errorAge = data.uptime - data.errors.lastErrorTime;
+          const fiveMinutes = 5 * 60 * 1000;
+          
+          if (data.errors.lastError && totalErrors > 0 && errorAge < fiveMinutes) {
             document.getElementById('lastError').style.display = 'block';
-            document.getElementById('lastErrorMsg').textContent = data.errors.lastError;
+            const ageText = errorAge < 60000 ? 
+              'vor ' + Math.floor(errorAge / 1000) + 's' : 
+              'vor ' + Math.floor(errorAge / 60000) + 'min';
+            document.getElementById('lastErrorMsg').textContent = data.errors.lastError + ' (' + ageText + ')';
+          } else {
+            document.getElementById('lastError').style.display = 'none';
           }
           
           if (data.history && data.history.length > 0) {
-            drawChart(data.history);
+            fullHistoryData = data.history;
+            drawChart(filterHistoryByTimeRange(data.history));
           }
         })
         .catch(e => console.error('Fehler:', e));
@@ -692,12 +962,87 @@ const char* htmlPage = R"rawliteral(
         .then(data => {
           document.getElementById('ssid').value = data.ssid;
           document.getElementById('password').value = data.password;
+          document.getElementById('hostname').value = data.hostname || 'ESP32-GasZaehler';
           document.getElementById('mqtt_server').value = data.mqtt_server;
           document.getElementById('mqtt_port').value = data.mqtt_port;
+          document.getElementById('mqtt_user').value = data.mqtt_user || '';
+          document.getElementById('mqtt_pass').value = data.mqtt_pass || '';
           document.getElementById('mqtt_topic').value = data.mqtt_topic;
           document.getElementById('poll_interval').value = data.poll_interval;
         })
         .catch(e => console.error('Fehler:', e));
+    }
+
+    function refreshLogs() {
+      fetch('/api/logs')
+        .then(r => r.json())
+        .then(data => {
+          const container = document.getElementById('logContainer');
+          if (data.logs.length === 0) {
+            container.innerHTML = '<div style="text-align: center; color: #999;">Keine Logs verfügbar</div>';
+            return;
+          }
+          
+          let html = '';
+          // Neueste zuerst
+          for (let i = data.logs.length - 1; i >= 0; i--) {
+            const log = data.logs[i];
+            const time = Math.floor(log.timestamp / 1000);
+            const color = log.message.includes('Fehler') || log.message.includes('ERROR') ? '#dc3545' : 
+                         log.message.includes('Verbunden') || log.message.includes('OK') ? '#28a745' : '#333';
+            html += `<div style="margin-bottom: 5px; color: ${color};">`;
+            html += `<span style="color: #666;">[${time}s]</span> ${log.message}`;
+            html += '</div>';
+          }
+          container.innerHTML = html;
+          
+          // Auto-scroll nach unten wenn nötig
+          if (container.scrollHeight - container.scrollTop < container.clientHeight + 100) {
+            container.scrollTop = container.scrollHeight;
+          }
+        })
+        .catch(e => console.error('Fehler:', e));
+    }
+
+    function scanWifi() {
+      const btn = event.target;
+      const originalText = btn.textContent;
+      btn.textContent = 'Scanne...';
+      btn.disabled = true;
+      
+      fetch('/api/wifi/scan')
+        .then(r => r.json())
+        .then(data => {
+          const select = document.getElementById('wifiList');
+          select.innerHTML = '<option value="">-- Netzwerk auswählen --</option>';
+          
+          data.networks.forEach(net => {
+            const option = document.createElement('option');
+            const signal = net.rssi > -50 ? '███' : net.rssi > -70 ? '██░' : '█░░';
+            const lock = net.encryption ? '🔒' : '🔓';
+            option.value = net.ssid;
+            option.textContent = `${net.ssid} ${signal} ${lock} (${net.rssi}dBm)`;
+            select.appendChild(option);
+          });
+          
+          select.style.display = 'block';
+          btn.textContent = originalText;
+          btn.disabled = false;
+        })
+        .catch(e => {
+          console.error('Fehler:', e);
+          alert('WiFi-Scan fehlgeschlagen!');
+          btn.textContent = originalText;
+          btn.disabled = false;
+        });
+    }
+
+    function selectWifi() {
+      const select = document.getElementById('wifiList');
+      const ssidInput = document.getElementById('ssid');
+      if (select.value) {
+        ssidInput.value = select.value;
+      }
     }
 
     function saveConfig(event) {
@@ -706,8 +1051,11 @@ const char* htmlPage = R"rawliteral(
       const config = {
         ssid: formData.get('ssid'),
         password: formData.get('password'),
+        hostname: formData.get('hostname'),
         mqtt_server: formData.get('mqtt_server'),
         mqtt_port: parseInt(formData.get('mqtt_port')),
+        mqtt_user: formData.get('mqtt_user'),
+        mqtt_pass: formData.get('mqtt_pass'),
         mqtt_topic: formData.get('mqtt_topic'),
         poll_interval: parseInt(formData.get('poll_interval'))
       };
@@ -733,6 +1081,72 @@ const char* htmlPage = R"rawliteral(
       });
     }
 
+    function setTimeRange(hours) {
+      timeRangeHours = hours;
+      
+      // Update button styles
+      document.querySelectorAll('[id^="btn"]').forEach(btn => {
+        btn.style.background = 'white';
+        btn.style.color = '#667eea';
+      });
+      
+      if (hours === 24) document.getElementById('btn24h').style.background = '#667eea';
+      else if (hours === 168) document.getElementById('btn7d').style.background = '#667eea';
+      else if (hours === 720) document.getElementById('btn30d').style.background = '#667eea';
+      else document.getElementById('btnAll').style.background = '#667eea';
+      
+      document.querySelectorAll('[id^="btn"]').forEach(btn => {
+        if (btn.style.background === 'rgb(102, 126, 234)' || btn.style.background === '#667eea') {
+          btn.style.color = 'white';
+        }
+      });
+      
+      drawChart(filterHistoryByTimeRange(fullHistoryData));
+    }
+    
+    function filterHistoryByTimeRange(history) {
+      if (!history || history.length === 0) return history;
+      if (timeRangeHours === 0) return history; // Alle anzeigen
+      
+      const now = Date.now() / 1000;
+      const cutoff = now - (timeRangeHours * 3600);
+      
+      return history.filter(point => point.timestamp >= cutoff);
+    }
+
+    function setTimeRange(hours) {
+      timeRangeHours = hours;
+      
+      // Update button styles
+      document.querySelectorAll('[id^="btn"]').forEach(btn => {
+        btn.style.background = 'white';
+        btn.style.color = '#667eea';
+      });
+      
+      if (hours === 24) document.getElementById('btn24h').style.background = '#667eea';
+      else if (hours === 168) document.getElementById('btn7d').style.background = '#667eea';
+      else if (hours === 720) document.getElementById('btn30d').style.background = '#667eea';
+      else document.getElementById('btnAll').style.background = '#667eea';
+      
+      document.querySelectorAll('[id^="btn"]').forEach(btn => {
+        if (btn.style.background === 'rgb(102, 126, 234)' || btn.style.background === '#667eea') {
+          btn.style.color = 'white';
+        }
+      });
+      
+      drawChart(filterHistoryByTimeRange(fullHistoryData));
+    }
+    
+    function filterHistoryByTimeRange(history) {
+      if (!history || history.length === 0) return history;
+      if (timeRangeHours === 0) return history; // Alle anzeigen
+      
+      const now = Date.now() / 1000;
+      const cutoff = now - (timeRangeHours * 3600);
+      
+      return history.filter(point => point.timestamp >= cutoff);
+    }
+
     function formatUptime(ms) {
       const s = Math.floor(ms / 1000);
       const m = Math.floor(s / 60);
@@ -750,6 +1164,15 @@ const char* htmlPage = R"rawliteral(
       canvas.height = canvas.offsetHeight;
       
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      if (!history || history.length === 0) {
+        ctx.fillStyle = '#999';
+        ctx.font = '16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Keine Daten für diesen Zeitraum', canvas.width / 2, canvas.height / 2);
+        lastChartData = [];
+        return;
+      }
       
       if (history.length < 2) return;
       
@@ -771,14 +1194,30 @@ const char* htmlPage = R"rawliteral(
       ctx.lineTo(canvas.width - padding, canvas.height - padding);
       ctx.stroke();
       
-      // Linie
-      ctx.strokeStyle = '#667eea';
-      ctx.lineWidth = 2;
+      // Grid lines
+      ctx.strokeStyle = '#f0f0f0';
+      ctx.lineWidth = 0.5;
+      for (let i = 1; i < 5; i++) {
+        const y = padding + (chartHeight / 5) * i;
+        ctx.beginPath();
+        ctx.moveTo(padding, y);
+        ctx.lineTo(canvas.width - padding, y);
+        ctx.stroke();
+      }
+      
+      // Linie mit Gradient
+      const gradient = ctx.createLinearGradient(0, padding, 0, canvas.height - padding);
+      gradient.addColorStop(0, '#667eea');
+      gradient.addColorStop(1, '#764ba2');
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 3;
       ctx.beginPath();
       
+      lastChartData = [];
       history.forEach((point, i) => {
         const x = padding + (i / (history.length - 1)) * chartWidth;
         const y = canvas.height - padding - ((point.volume - min) / range) * chartHeight;
+        lastChartData.push({x, y, volume: point.volume, timestamp: point.timestamp});
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       });
@@ -786,12 +1225,13 @@ const char* htmlPage = R"rawliteral(
       
       // Punkte
       ctx.fillStyle = '#667eea';
-      history.forEach((point, i) => {
-        const x = padding + (i / (history.length - 1)) * chartWidth;
-        const y = canvas.height - padding - ((point.volume - min) / range) * chartHeight;
+      lastChartData.forEach(point => {
         ctx.beginPath();
-        ctx.arc(x, y, 4, 0, 2 * Math.PI);
+        ctx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
         ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 2;
+        ctx.stroke();
       });
       
       // Beschriftung
@@ -800,6 +1240,57 @@ const char* htmlPage = R"rawliteral(
       ctx.fillText(max.toFixed(2) + ' m³', 5, padding);
       ctx.fillText(min.toFixed(2) + ' m³', 5, canvas.height - padding + 5);
     }
+    
+    // Chart Mouse Interaction for Tooltips
+    document.addEventListener('DOMContentLoaded', function() {
+      const canvas = document.getElementById('chart');
+      const tooltip = document.getElementById('chartTooltip');
+      
+      canvas.addEventListener('mousemove', function(e) {
+        if (lastChartData.length === 0) return;
+        
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        let closestPoint = null;
+        let minDist = Infinity;
+        
+        lastChartData.forEach(point => {
+          const dist = Math.sqrt(Math.pow(mouseX - point.x, 2) + Math.pow(mouseY - point.y, 2));
+          if (dist < minDist && dist < 20) {
+            minDist = dist;
+            closestPoint = point;
+          }
+        });
+        
+        if (closestPoint) {
+          const date = new Date(closestPoint.timestamp * 1000);
+          const timeStr = date.toLocaleString('de-DE', {hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit'});
+          tooltip.innerHTML = `<strong>${closestPoint.volume.toFixed(2)} m³</strong><br>${timeStr}`;
+          tooltip.style.display = 'block';
+          tooltip.style.left = (e.clientX + 15) + 'px';
+          tooltip.style.top = (e.clientY - 40) + 'px';
+          canvas.style.cursor = 'pointer';
+        } else {
+          tooltip.style.display = 'none';
+          canvas.style.cursor = 'crosshair';
+        }
+      });
+      
+      canvas.addEventListener('mouseleave', function() {
+        tooltip.style.display = 'none';
+      });
+      
+      // Zoom with Mouse Wheel
+      canvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        chartZoom *= delta;
+        chartZoom = Math.max(0.5, Math.min(3, chartZoom));
+        drawChart(filterHistoryByTimeRange(fullHistoryData));
+      });
+    });
 
     updateData();
     updateInterval = setInterval(updateData, 5000);
@@ -816,6 +1307,7 @@ void handleAPI() {
   String json = "{";
   json += "\"volume\":" + String(lastVolume, 2) + ",";
   json += "\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+  json += "\"wifiRSSI\":" + String(WiFi.RSSI()) + ",";
   json += "\"mqttConnected\":" + String(client.connected() ? "true" : "false") + ",";
   json += "\"apMode\":" + String(apMode ? "true" : "false") + ",";
   json += "\"apSSID\":\"" + String(ap_ssid) + "\",";
@@ -824,12 +1316,23 @@ void handleAPI() {
   json += "\"lastUpdate\":" + String(measurements.empty() ? 0 : measurements.back().timestamp) + ",";
   json += "\"timeInitialized\":" + String(timeInitialized ? "true" : "false") + ",";
   json += "\"pollInterval\":" + String(poll_interval / 1000) + ",";
+  json += "\"system\":{";
+  json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"heapSize\":" + String(ESP.getHeapSize()) + ",";
+  json += "\"flashSize\":" + String(ESP.getFlashChipSize()) + ",";
+  json += "\"sketchSize\":" + String(ESP.getSketchSize()) + ",";
+  json += "\"freeSketch\":" + String(ESP.getFreeSketchSpace()) + ",";
+  json += "\"chipModel\":\"" + String(ESP.getChipModel()) + "\",";
+  json += "\"chipCores\":" + String(ESP.getChipCores()) + ",";
+  json += "\"cpuFreq\":" + String(ESP.getCpuFreqMHz());
+  json += "},";
   json += "\"errors\":{";
   json += "\"mbusTimeouts\":" + String(errorStats.mbusTimeouts) + ",";
   json += "\"mbusParseErrors\":" + String(errorStats.mbusParseErrors) + ",";
   json += "\"mqttErrors\":" + String(errorStats.mqttErrors) + ",";
   json += "\"wifiDisconnects\":" + String(errorStats.wifiDisconnects) + ",";
-  json += "\"lastError\":\"" + String(errorStats.lastErrorMsg) + "\"";
+  json += "\"lastError\":\"" + String(errorStats.lastErrorMsg) + "\",";
+  json += "\"lastErrorTime\":" + String(errorStats.lastError);
   json += "},";
   json += "\"history\":[";
   for (size_t i = 0; i < measurements.size(); i++) {
@@ -845,12 +1348,48 @@ void handleConfigGet() {
   String json = "{";
   json += "\"ssid\":\"" + String(ssid) + "\",";
   json += "\"password\":\"" + String(password) + "\",";
+  json += "\"hostname\":\"" + String(hostname) + "\",";
   json += "\"mqtt_server\":\"" + String(mqtt_server) + "\",";
   json += "\"mqtt_port\":" + String(mqtt_port) + ",";
+  json += "\"mqtt_user\":\"" + String(mqtt_user) + "\",";
+  json += "\"mqtt_pass\":\"" + String(mqtt_pass) + "\",";
   json += "\"mqtt_topic\":\"" + String(mqtt_topic) + "\",";
   json += "\"poll_interval\":" + String(poll_interval / 1000);
   json += "}";
   server.send(200, "application/json", json);
+}
+
+void handleLogs() {
+  String json = "{\"logs\":[";
+  for (size_t i = 0; i < logBuffer.size(); i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"timestamp\":" + String(logBuffer[i].timestamp);
+    json += ",\"message\":\"" + logBuffer[i].message + "\"";
+    json += "}";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+void handleWifiScan() {
+  Serial.println("WiFi-Scan gestartet...");
+  int n = WiFi.scanNetworks();
+  
+  String json = "{\"networks\":[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"ssid\":\"" + WiFi.SSID(i) + "\"";
+    json += ",\"rssi\":" + String(WiFi.RSSI(i));
+    json += ",\"encryption\":" + String(WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false");
+    json += "}";
+  }
+  json += "]}";
+  
+  WiFi.scanDelete();
+  server.send(200, "application/json", json);
+  Serial.println("WiFi-Scan abgeschlossen: " + String(n) + " Netzwerke gefunden");
 }
 
 void handleConfigPost() {
@@ -876,6 +1415,14 @@ void handleConfigPost() {
       val.toCharArray(password, sizeof(password));
     }
     
+    idx = body.indexOf("\"hostname\":\"");
+    if (idx >= 0) {
+      int start = idx + 12;
+      int end = body.indexOf("\"", start);
+      String val = body.substring(start, end);
+      val.toCharArray(hostname, sizeof(hostname));
+    }
+    
     idx = body.indexOf("\"mqtt_server\":\"");
     if (idx >= 0) {
       int start = idx + 15;
@@ -890,6 +1437,22 @@ void handleConfigPost() {
       int end = body.indexOf(",", start);
       if (end < 0) end = body.indexOf("}", start);
       mqtt_port = body.substring(start, end).toInt();
+    }
+    
+    idx = body.indexOf("\"mqtt_user\":\"");
+    if (idx >= 0) {
+      int start = idx + 13;
+      int end = body.indexOf("\"", start);
+      String val = body.substring(start, end);
+      val.toCharArray(mqtt_user, sizeof(mqtt_user));
+    }
+    
+    idx = body.indexOf("\"mqtt_pass\":\"");
+    if (idx >= 0) {
+      int start = idx + 13;
+      int end = body.indexOf("\"", start);
+      String val = body.substring(start, end);
+      val.toCharArray(mqtt_pass, sizeof(mqtt_pass));
     }
     
     idx = body.indexOf("\"mqtt_topic\":\"");
@@ -926,12 +1489,40 @@ void handleConfigPost() {
 }
 
 void setupWebServer() {
-  server.on("/", handleRoot);
-  server.on("/api/data", handleAPI);
+  Serial.println("\n=== WebServer Setup Start ===");
+  
+  // Routen registrieren
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/data", HTTP_GET, handleAPI);
   server.on("/api/config", HTTP_GET, handleConfigGet);
   server.on("/api/config", HTTP_POST, handleConfigPost);
+  server.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
+  server.on("/api/logs", HTTP_GET, handleLogs);
+  
+  // Server starten auf Port 80
   server.begin();
-  Serial.println("WebServer gestartet auf http://" + WiFi.localIP().toString());
+  
+  Serial.println("WebServer Routen registriert:");
+  Serial.println("  GET  /");
+  Serial.println("  GET  /api/data");
+  Serial.println("  GET  /api/config");
+  Serial.println("  POST /api/config");
+  Serial.println("  GET  /api/wifi/scan");
+  
+  String ip = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  Serial.println("\n========================================");
+  Serial.println("   WEBSERVER GESTARTET");
+  Serial.println("========================================");
+  Serial.println("Modus: " + String(apMode ? "Access Point" : "Station"));
+  Serial.println("IP-Adresse: " + ip);
+  Serial.println("Hostname: " + String(hostname));
+  Serial.println("Port: 80");
+  Serial.println("\nZugriff:");
+  Serial.println("  http://" + ip);
+  if (!apMode && strlen(hostname) > 0) {
+    Serial.println("  http://" + String(hostname) + ".local");
+  }
+  Serial.println("========================================\n");
 }
 
 // ---- Setup ----
@@ -945,8 +1536,49 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
   
+  // Reset Button konfigurieren
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+  
+  // Prüfen ob BOOT-Button beim Start gedrückt ist (LOW = gedrückt)
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    Serial.println("\n*** CONFIG RESET ERKANNT ***");
+    Serial.println("BOOT-Button war beim Start gedrückt.");
+    Serial.println("Lösche gespeicherte Konfiguration...");
+    
+    preferences.begin("gas-config", false);
+    preferences.clear();
+    preferences.end();
+    
+    Serial.println("Konfiguration gelöscht!");
+    Serial.println("Starte im Access Point Modus...\n");
+    
+    // Defaults setzen
+    strcpy(ssid, "SSID");
+    strcpy(password, "Password");
+    strcpy(hostname, "ESP32-GasZaehler");
+    strcpy(mqtt_server, "192.168.178.1");
+    mqtt_port = 1883;
+    strcpy(mqtt_topic, "gaszaehler/verbrauch");
+    poll_interval = 60000;
+    
+    delay(1000); // Warten damit Button losgelassen werden kann
+  }
+  
   loadConfig();
   setup_wifi();
+  
+  // Kurze Pause nach WiFi-Setup
+  delay(1000);
+  
+  // mDNS starten (nur im Station-Modus)
+  if (WiFi.status() == WL_CONNECTED && !apMode) {
+    if (MDNS.begin(hostname)) {
+      Serial.println("mDNS gestartet: " + String(hostname) + ".local");
+      MDNS.addService("http", "tcp", 80);
+    } else {
+      Serial.println("mDNS Start fehlgeschlagen");
+    }
+  }
   
   // NTP Zeit initialisieren
   if (WiFi.status() == WL_CONNECTED) {
@@ -963,12 +1595,22 @@ void setup() {
   
   client.setServer(mqtt_server, mqtt_port);
   client.setBufferSize(512); // Größerer Buffer für Discovery
-
-  mbusSerial.begin(MBUS_BAUD, SERIAL_8E1, MBUS_RX_PIN, MBUS_TX_PIN);
-  Serial.println("M-Bus UART bereit");
+  
+  // Client-ID mit MAC-Adresse für Eindeutigkeit
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(mqtt_client_id, sizeof(mqtt_client_id), "ESP32Gas-%02X%02X%02X", mac[3], mac[4], mac[5]);
+  Serial.println("MQTT Client-ID: " + String(mqtt_client_id));
 
   setupOTA();
+  
+  // WebServer starten (funktioniert sowohl im AP als auch Station-Modus)
   setupWebServer();
+  
+  // M-Bus initialisieren
+  mbusSerial.begin(MBUS_BAUD, SERIAL_8E1, MBUS_RX_PIN, MBUS_TX_PIN);
+  Serial.println("M-Bus UART bereit");
+  
   mbusLastAction = millis() - poll_interval; // sofort Poll starten
   
   Serial.println("Setup abgeschlossen!");
@@ -998,12 +1640,22 @@ void loop() {
   server.handleClient();
   updateStatusLED();
   
+  unsigned long now = millis();
+  
+  // Status alle 60 Sekunden ausgeben
+  static unsigned long lastStatusPrint = 0;
+  if (now - lastStatusPrint >= 60000) {
+    Serial.println("\n[Status] WiFi: " + String(WiFi.status() == WL_CONNECTED ? "OK" : "FEHLER") + 
+                   " | MQTT: " + String(client.connected() ? "OK" : "FEHLER") +
+                   " | IP: " + WiFi.localIP().toString() +
+                   " | Uptime: " + String(millis()/1000) + "s");
+    lastStatusPrint = now;
+  }
+  
   // Home Assistant Discovery senden (einmalig nach Connect)
   if (client.connected() && !haDiscoverySent) {
     sendHomeAssistantDiscovery();
   }
-
-  unsigned long now = millis();
 
   switch (mbusState) {
     case MBUS_IDLE:
@@ -1025,19 +1677,42 @@ void loop() {
       }
 
       if ((now - mbusLastAction >= MBUS_RESPONSE_TIMEOUT) || mbusLen >= sizeof(mbusBuffer)) {
+        mbusStats.totalPolls++;
+        mbusStats.lastResponseTime = now - mbusLastAction;
+        mbusStats.totalResponseTime += mbusStats.lastResponseTime;
+        
         if (mbusLen > 0) {
           Serial.print("MBUS Antwort empfangen (");
           Serial.print(mbusLen);
-          Serial.println(" Bytes)");
+          Serial.print(" Bytes, ");
+          Serial.print(mbusStats.lastResponseTime);
+          Serial.println("ms)");
+          
+          // Hex Dump speichern
+          mbusStats.lastHexDump = "";
+          for (size_t i = 0; i < min(mbusLen, (size_t)32); i++) {
+            char hex[4];
+            sprintf(hex, "%02X ", mbusBuffer[i]);
+            mbusStats.lastHexDump += hex;
+          }
 
           float volume = parseGasVolumeBCD(mbusBuffer, mbusLen);
           if (volume >= 0) {
+            mbusStats.successfulPolls++;
             char payload[16];
             dtostrf(volume, 0, 2, payload);
             
             if (client.publish(mqtt_topic, payload)) {
               Serial.print("Verbrauch gesendet: ");
               Serial.println(payload);
+              
+              // Additional HA sensors
+              String wifiTopic = String(mqtt_topic) + "_wifi";
+              client.publish(wifiTopic.c_str(), String(WiFi.RSSI()).c_str());
+              
+              String rateTopic = String(mqtt_topic) + "_mbus_rate";
+              float rate = mbusStats.totalPolls > 0 ? (mbusStats.successfulPolls * 100.0 / mbusStats.totalPolls) : 0;
+              client.publish(rateTopic.c_str(), String(rate, 1).c_str());
             } else {
               errorStats.mqttErrors++;
               logError("MQTT Publish fehlgeschlagen");
