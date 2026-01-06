@@ -239,9 +239,8 @@ Nach dem ersten Flash:
 ## 🌐 WebUI Übersicht
 
 ### Dashboard (`http://[ESP32-IP]`)
-```
+
 ![alt text](Screenshot.png)
-```
 
 ### Konfiguration
 
