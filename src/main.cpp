@@ -10,16 +10,16 @@
 #include <time.h>
 #include <vector>
 
-// ---- ANSI Farb-Codes für Serial Monitor ----
-#define ANSI_RESET   "\033[0m"
-#define ANSI_BOLD    "\033[1m"
-#define ANSI_RED     "\033[31m"
-#define ANSI_GREEN   "\033[32m"
-#define ANSI_YELLOW  "\033[33m"
-#define ANSI_BLUE    "\033[34m"
-#define ANSI_MAGENTA "\033[35m"
-#define ANSI_CYAN    "\033[36m"
-#define ANSI_WHITE   "\033[37m"
+// ---- ANSI Farb-Codes für Serial Monitor (deaktiviert für reine Text-Ausgabe) ----
+#define ANSI_RESET   ""
+#define ANSI_BOLD    ""
+#define ANSI_RED     ""
+#define ANSI_GREEN   ""
+#define ANSI_YELLOW  ""
+#define ANSI_BLUE    ""
+#define ANSI_MAGENTA ""
+#define ANSI_CYAN    ""
+#define ANSI_WHITE   ""
 
 // ---- Konfiguration ----
 char ssid[32] = "SSID";
@@ -32,7 +32,7 @@ char mqtt_pass[64] = ""; // MQTT Password (optional)
 char mqtt_topic[64] = "gaszaehler/verbrauch";
 char mqtt_availability_topic[64] = "gaszaehler/availability";
 char mqtt_client_id[32] = "ESP32GasClient";
-unsigned long poll_interval = 60000; // Standard: 60 Sekunden
+unsigned long poll_interval = 30000; // Standard: 30 Sekunden
 float gas_calorific_value = 10.0; // kWh/m - Brennwert (typisch 8-12 kWh/m)
 float gas_correction_factor = 1.0; // Z-Zahl Korrekturfaktor (typisch 0.95-1.0)
 bool use_static_ip = false;
@@ -134,9 +134,21 @@ struct LogEntry {
 std::vector<LogEntry> logBuffer;
 
 void addLog(const String& msg) {
+  // ANSI-Codes aus der Nachricht entfernen für WebUI (nur im logBuffer)
+  String cleanMsg = msg;
+  cleanMsg.replace("\033[0m", "");   // ANSI_RESET
+  cleanMsg.replace("\033[1m", "");   // ANSI_BOLD
+  cleanMsg.replace("\033[31m", "");  // ANSI_RED
+  cleanMsg.replace("\033[32m", "");  // ANSI_GREEN
+  cleanMsg.replace("\033[33m", "");  // ANSI_YELLOW
+  cleanMsg.replace("\033[34m", "");  // ANSI_BLUE
+  cleanMsg.replace("\033[35m", "");  // ANSI_MAGENTA
+  cleanMsg.replace("\033[36m", "");  // ANSI_CYAN
+  cleanMsg.replace("\033[37m", "");  // ANSI_WHITE
+  
   LogEntry entry;
   entry.timestamp = millis();
-  entry.message = msg;
+  entry.message = cleanMsg;
   logBuffer.push_back(entry);
   
   // Ringbuffer: alte Einträge löschen
@@ -144,7 +156,7 @@ void addLog(const String& msg) {
     logBuffer.erase(logBuffer.begin());
   }
   
-  // Serial Output mit echter Zeit wenn verfügbar
+  // Serial Output mit echter Zeit wenn verfügbar (mit ANSI-Codes)
   if (timeInitialized) {
     time_t now = time(nullptr);
     struct tm timeinfo;
@@ -190,7 +202,10 @@ size_t mbusLen = 0;
 
 // ---- Konfiguration laden/speichern ----
 void loadConfig() {
-  preferences.begin("gas-config", false);
+  if (!preferences.begin("gas-config", false)) {
+    Serial.println("ERROR: Konnte gas-config Namespace nicht oeffnen!");
+    return;
+  }
   
   // Prfen ob bereits konfiguriert wurde (config_done Flag)
   bool configDone = preferences.getBool("config_done", false);
@@ -203,7 +218,8 @@ void loadConfig() {
   preferences.getString("mqtt_user", mqtt_user, sizeof(mqtt_user));
   preferences.getString("mqtt_pass", mqtt_pass, sizeof(mqtt_pass));
   preferences.getString("mqtt_topic", mqtt_topic, sizeof(mqtt_topic));
-  poll_interval = preferences.getULong("poll_interval", 60000);
+  poll_interval = preferences.getULong("poll_interval", 30000);
+  Serial.println("DEBUG loadConfig: poll_interval aus Flash = " + String(poll_interval) + " ms");
   gas_calorific_value = preferences.getFloat("gas_calorific", 10.0);
   gas_correction_factor = preferences.getFloat("gas_correction", 1.0);
   use_static_ip = preferences.getBool("use_static_ip", false);
@@ -214,7 +230,10 @@ void loadConfig() {
   preferences.end();
   
   // Verlaufsdaten aus Flash laden
-  historyPrefs.begin("gas-history", true); // Read-only
+  // Erst versuchen mit read-write zu oeffnen um Namespace zu erstellen falls noetig
+  if (!historyPrefs.begin("gas-history", false)) {
+    Serial.println("WARN: Konnte gas-history Namespace nicht oeffnen/erstellen");
+  }
   size_t dataCount = historyPrefs.getUInt("count", 0);
   
   // Validierung: Nicht mehr als MAX_MEASUREMENTS laden
@@ -246,9 +265,15 @@ void loadConfig() {
   }
   historyPrefs.end();
   
-  // Validierung: Poll-Intervall muss zwischen 10s und 1h liegen
-  if (poll_interval < 10000) poll_interval = 10000; // Minimum 10s
-  if (poll_interval > 3600000) poll_interval = 3600000; // Maximum 1h
+  // Validierung: Poll-Intervall muss zwischen 10s und 5min liegen.
+  // Wenn im Flash ein ungültiger (z.B. 0) Wert gespeichert wurde, fallback auf 30s.
+  Serial.println("DEBUG loadConfig: poll_interval vor Validierung = " + String(poll_interval) + " ms");
+  if (poll_interval < 10000) {
+    Serial.println("WARN: Ungueltiger poll_interval im Flash: " + String(poll_interval) + " ms - setze auf Default 30000 ms");
+    poll_interval = 30000; // Fallback auf 30s statt 10s, um unerwartete 10s-Reset zu vermeiden
+  }
+  if (poll_interval > 300000) poll_interval = 300000; // Maximum 5min
+  Serial.println("DEBUG loadConfig: poll_interval nach Validierung = " + String(poll_interval) + " ms");
   
   // Wenn noch nie konfiguriert oder SSID leer -> Defaults setzen
   if (!configDone || strlen(ssid) == 0) {
@@ -268,8 +293,10 @@ void loadConfig() {
 
 void saveConfig() {
   // Validierung vor dem Speichern
+  Serial.println("DEBUG saveConfig: poll_interval vor Validierung = " + String(poll_interval) + " ms");
   if (poll_interval < 10000) poll_interval = 10000;
-  if (poll_interval > 3600000) poll_interval = 3600000;
+  if (poll_interval > 300000) poll_interval = 300000; // Max 5min
+  Serial.println("DEBUG saveConfig: poll_interval nach Validierung = " + String(poll_interval) + " ms");
   
   preferences.begin("gas-config", false);
   preferences.putString("ssid", ssid);
@@ -281,6 +308,8 @@ void saveConfig() {
   preferences.putString("mqtt_pass", mqtt_pass);
   preferences.putString("mqtt_topic", mqtt_topic);
   preferences.putULong("poll_interval", poll_interval);
+  // Readback of poll_interval before end()
+  unsigned long rb_after = preferences.getULong("poll_interval", 0);
   preferences.putFloat("gas_calorific", gas_calorific_value);
   preferences.putFloat("gas_correction", gas_correction_factor);
   preferences.putBool("use_static_ip", use_static_ip);
@@ -290,9 +319,9 @@ void saveConfig() {
   preferences.putString("static_dns", static_dns);
   preferences.putBool("config_done", true); // Markiere als konfiguriert
   preferences.end();
-  
+
   Serial.println("Konfiguration gespeichert");
-  Serial.println("Poll-Intervall: " + String(poll_interval / 1000) + "s (" + String(poll_interval) + "ms)");
+  Serial.println("Poll-Intervall: " + String(poll_interval / 1000) + "s (" + String(poll_interval) + "ms) saved_readback=" + String(rb_after) + " ms");
 }
 
 // ---- Persistent Data Storage ----
@@ -580,7 +609,7 @@ void sendHomeAssistantDiscovery() {
   Serial.println("  - WiFi: " + String(mqtt_topic) + "_wifi");
   Serial.println("  - M-Bus Rate: " + String(mqtt_topic) + "_mbus_rate");
   Serial.println("  - Availability: " + String(mqtt_availability_topic));
-  Serial.println("Brennwert: " + String(gas_calorific_value, 3) + " kWh/m³, Z-Zahl: " + String(gas_correction_factor, 3));
+  Serial.println("Brennwert: " + String(gas_calorific_value, 6) + " kWh/m³, Z-Zahl: " + String(gas_correction_factor, 6));
   haDiscoverySent = true;
 }
 
@@ -1329,19 +1358,19 @@ const char* htmlPage = R"rawliteral(
           <h3 style="margin-top: 30px;">Abfrage-Einstellungen</h3>
           <div class="form-group">
             <label>Poll-Intervall (Sekunden)</label>
-            <input type="number" id="poll_interval" name="poll_interval" min="10" max="3600" required>
-            <small style="color: #666;">Wie oft der Gaszähler abgefragt wird (10-3600 Sekunden)</small>
+            <input type="number" id="poll_interval" name="poll_interval" min="10" max="300" required>
+            <small style="color: #666;">Wie oft der Gaszähler abgefragt wird (10-300 Sekunden)</small>
           </div>
           
           <h3 style="margin-top: 30px;">Energie-Umrechnung (für Home Assistant Energy Dashboard)</h3>
           <div class="form-group">
             <label>Brennwert (kWh/m³)</label>
-            <input type="number" id="gas_calorific" name="gas_calorific" step="any" min="8" max="13" required>
+            <input type="number" id="gas_calorific" name="gas_calorific" step="0.000001" min="8" max="13" required>
             <small style="color: var(--text-muted);">Brennwert von Erdgas (typisch 10.0-10.5 kWh/m³, siehe Gasrechnung)</small>
           </div>
           <div class="form-group">
             <label>Korrekturfaktor (Z-Zahl)</label>
-            <input type="number" id="gas_correction" name="gas_correction" step="any" min="0.90" max="1.10" required>
+            <input type="number" id="gas_correction" name="gas_correction" step="0.000001" min="0.90" max="1.10" required>
             <small style="color: var(--text-muted);">Zustandszahl für Druck/Temperatur (typisch 0.95-0.97, siehe Gasrechnung)</small>
           </div>
           
@@ -1364,6 +1393,34 @@ const char* htmlPage = R"rawliteral(
     </div>
 
     <div id="diagnostics" class="page">
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+          <h2 style="margin: 0;">⚠ Fehlerstatistik</h2>
+          <button onclick="resetErrorStats()" class="btn" style="padding: 8px 16px; font-size: 0.9em; background: var(--warning-color);">🗑 Zurücksetzen</button>
+        </div>
+        <div class="status-grid">
+          <div class="status-item">
+            <div class="label">M-Bus Timeouts</div>
+            <div class="value" id="errMbusTimeout">0</div>
+          </div>
+          <div class="status-item">
+            <div class="label">M-Bus Parse-Fehler</div>
+            <div class="value" id="errMbusParse">0</div>
+          </div>
+          <div class="status-item">
+            <div class="label">MQTT Fehler</div>
+            <div class="value" id="errMqtt">0</div>
+          </div>
+          <div class="status-item">
+            <div class="label">WLAN Trennungen</div>
+            <div class="value" id="errWifi">0</div>
+          </div>
+        </div>
+        <div id="lastError" style="margin-top: 15px; padding: 15px; background: var(--status-bg); border-radius: 10px; border-left: 4px solid var(--error-color); display: none;">
+          <strong style="color: var(--text-primary);">&#128681; Letzter Fehler:</strong> <span id="lastErrorMsg" style="color: var(--text-secondary); margin-left: 8px;">--</span>
+        </div>
+      </div>
+
       <div class="card">
         <h2>&#128187; System-Informationen</h2>
         <div class="status-grid">
@@ -1439,33 +1496,6 @@ const char* htmlPage = R"rawliteral(
         </div>
       </div>
 
-      <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-          <h2 style="margin: 0;">⚠ Fehlerstatistik</h2>
-          <button onclick="resetErrorStats()" class="btn" style="padding: 8px 16px; font-size: 0.9em; background: var(--warning-color);">🗑 Zurücksetzen</button>
-        </div>
-        <div class="status-grid">
-          <div class="status-item">
-            <div class="label">M-Bus Timeouts</div>
-            <div class="value" id="errMbusTimeout">0</div>
-          </div>
-          <div class="status-item">
-            <div class="label">M-Bus Parse-Fehler</div>
-            <div class="value" id="errMbusParse">0</div>
-          </div>
-          <div class="status-item">
-            <div class="label">MQTT Fehler</div>
-            <div class="value" id="errMqtt">0</div>
-          </div>
-          <div class="status-item">
-            <div class="label">WLAN Trennungen</div>
-            <div class="value" id="errWifi">0</div>
-          </div>
-        </div>
-        <div id="lastError" style="margin-top: 15px; padding: 15px; background: var(--status-bg); border-radius: 10px; border-left: 4px solid var(--error-color); display: none;">
-          <strong>&#128681; Letzter Fehler:</strong> <span id="lastErrorMsg" style="color: var(--text-secondary); margin-left: 8px;">--</span>
-        </div>
-      </div>
     </div>
 
     <div id="update" class="page">
@@ -1558,7 +1588,7 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
       currentPage = page;
       
       if (page === 'dashboard') {
-        updateInterval = setInterval(updateData, 5000);
+        if (updateInterval) clearInterval(updateInterval);
         updateData();
       } else {
         if (updateInterval) clearInterval(updateInterval);
@@ -1574,7 +1604,7 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
               let html = '<div style="display: grid; gap: 10px;">';
               data.history.slice(-10).reverse().forEach(point => {
                 const date = new Date(point.timestamp * 1000);
-                const energy = (point.volume * data.calorific * data.correction).toFixed(1);
+                const energy = (point.volume * data.calorific * data.correction).toFixed(3);
                 html += `<div style="padding: 10px; background: var(--status-bg); border-radius: 5px; display: flex; justify-content: space-between;">`;
                 html += `<span style="color: var(--text-secondary);">${date.toLocaleString('de-DE')}</span>`;
                 html += `<strong style="color: var(--text-primary);">${point.volume.toFixed(2)} m³ / ${energy} kWh</strong>`;
@@ -1607,7 +1637,7 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
           // Energie-Anzeige
           if (el('energyValue')) {
             if (data.volume >= 0 && data.calorific > 0) {
-              const energy = (data.volume * data.calorific * data.correction).toFixed(1);
+              const energy = (data.volume * data.calorific * data.correction).toFixed(3);
               el('energyValue').textContent = '⚡ ' + energy + ' kWh';
             } else {
               el('energyValue').textContent = '⚡ -- kWh';
@@ -1616,10 +1646,10 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
           
           // Brennwert & Zustandszahl anzeigen
           if (el('calorificDisplay')) {
-            el('calorificDisplay').textContent = data.calorific > 0 ? data.calorific.toFixed(1) : '--';
+            el('calorificDisplay').textContent = data.calorific > 0 ? data.calorific.toFixed(6) : '--';
           }
           if (el('correctionDisplay')) {
-            el('correctionDisplay').textContent = data.correction > 0 ? data.correction.toFixed(2) : '--';
+            el('correctionDisplay').textContent = data.correction > 0 ? data.correction.toFixed(6) : '--';
           }
           
           const wifiDiv = document.getElementById('wifiStatus');
@@ -1772,9 +1802,17 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
           }
           
           if (data.history && data.history.length > 0) {
-            fullHistoryData = data.history;
-            updateConsumptionStats(data.history, data.calorific, data.correction);
-            drawChart(filterHistoryByTimeRange(data.history));
+            // Normalize timestamps: some stored timestamps may be in ms (old devices)
+            // JS expects seconds. Detect and convert if needed.
+            const nowMs = Date.now();
+            let hist = data.history.map(p => ({ timestamp: p.timestamp, volume: p.volume }));
+            const seemsMs = hist.some(p => p.timestamp > nowMs + 1000);
+            if (seemsMs) {
+              hist = hist.map(p => ({ timestamp: Math.floor(p.timestamp / 1000), volume: p.volume }));
+            }
+            fullHistoryData = hist;
+            updateConsumptionStats(hist, data.calorific, data.correction);
+            drawChart(filterHistoryByTimeRange(hist));
           }
         })
         .catch(e => {
@@ -1826,16 +1864,16 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
       
       // Anzeigen mit Null-Checks
       if (el('statToday')) el('statToday').textContent = todayDiff.toFixed(2) + ' m³';
-      if (el('statTodayKwh')) el('statTodayKwh').textContent = (todayDiff * calorific * correction).toFixed(1) + ' kWh';
+      if (el('statTodayKwh')) el('statTodayKwh').textContent = (todayDiff * calorific * correction).toFixed(3) + ' kWh';
       
       if (el('statWeek')) el('statWeek').textContent = weekDiff.toFixed(2) + ' m³';
-      if (el('statWeekKwh')) el('statWeekKwh').textContent = (weekDiff * calorific * correction).toFixed(1) + ' kWh';
+      if (el('statWeekKwh')) el('statWeekKwh').textContent = (weekDiff * calorific * correction).toFixed(3) + ' kWh';
       
       if (el('statMonth')) el('statMonth').textContent = monthDiff.toFixed(2) + ' m³';
-      if (el('statMonthKwh')) el('statMonthKwh').textContent = (monthDiff * calorific * correction).toFixed(1) + ' kWh';
+      if (el('statMonthKwh')) el('statMonthKwh').textContent = (monthDiff * calorific * correction).toFixed(3) + ' kWh';
       
       if (el('statAvg')) el('statAvg').textContent = avgPerDay.toFixed(3) + ' m³';
-      if (el('statAvgKwh')) el('statAvgKwh').textContent = (avgPerDay * calorific * correction).toFixed(2) + ' kWh';
+      if (el('statAvgKwh')) el('statAvgKwh').textContent = (avgPerDay * calorific * correction).toFixed(3) + ' kWh';
     }
 
     function loadConfig() {
@@ -1853,8 +1891,8 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
           if (el('mqtt_pass')) el('mqtt_pass').value = data.mqtt_pass || '';
           if (el('mqtt_topic')) el('mqtt_topic').value = data.mqtt_topic;
           if (el('poll_interval')) el('poll_interval').value = data.poll_interval;
-          if (el('gas_calorific')) el('gas_calorific').value = data.gas_calorific || 10.0;
-          if (el('gas_correction')) el('gas_correction').value = data.gas_correction || 1.0;
+          if (el('gas_calorific')) el('gas_calorific').value = (data.gas_calorific || 10.0).toFixed(6);
+          if (el('gas_correction')) el('gas_correction').value = (data.gas_correction || 1.0).toFixed(6);
           
           // Static IP Felder
           const useStaticIp = data.use_static_ip || false;
@@ -1891,7 +1929,7 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
           // Neueste zuerst
           for (let i = data.logs.length - 1; i >= 0; i--) {
             const log = data.logs[i];
-            const uptimeSeconds = Math.floor(log.timestamp / 1000);
+            
             
             // Absolute Zeit berechnen (jetzt - uptime + log timestamp)
             const logDate = new Date(now - (data.uptime - log.timestamp));
@@ -1930,7 +1968,7 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
             
             html += `<div style="margin-bottom: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 6px; border-left: 3px solid ${color};">`;
             html += `<span style="color: var(--text-secondary); font-weight: 600; font-size: 0.85em;">[${timeStr}]</span> `;
-            html += `<span style="color: var(--text-muted); font-size: 0.8em;">(${uptimeSeconds}s)</span> `;
+            
             html += `<span style="color: ${color}; margin: 0 4px;">${icon}</span>`;
             if (category) {
               html += `<span style="color: ${color}; font-weight: 600; font-size: 0.85em; background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px; margin-right: 6px;">${category}</span>`;
@@ -2001,7 +2039,15 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
         mqtt_user: formData.get('mqtt_user'),
         mqtt_pass: formData.get('mqtt_pass'),
         mqtt_topic: formData.get('mqtt_topic'),
-        poll_interval: parseInt(formData.get('poll_interval')),
+        // Ensure we send a valid integer: prefer parsed FormData, fallback to element value, then default 30
+        poll_interval: (function(){
+          const v = parseInt(formData.get('poll_interval'));
+          if (!isNaN(v) && v > 0) return v;
+          const el = document.getElementById('poll_interval');
+          const ev = el ? parseInt(el.value) : NaN;
+          if (!isNaN(ev) && ev > 0) return ev;
+          return 30;
+        })(),
         gas_calorific: parseFloat(formData.get('gas_calorific')),
         gas_correction: parseFloat(formData.get('gas_correction')),
         use_static_ip: document.getElementById('use_static_ip').checked,
@@ -2052,7 +2098,13 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
         }
       });
       
-      drawChart(filterHistoryByTimeRange(fullHistoryData));
+      const filteredData = filterHistoryByTimeRange(fullHistoryData);
+      drawChart(filteredData);
+      
+      // Update statistics based on filtered time range
+      fetch('/api/data').then(r => r.json()).then(data => {
+        updateConsumptionStats(filteredData, data.calorific, data.correction);
+      }).catch(e => console.error('Fehler beim Laden der Konfiguration:', e));
     }
     
     function filterHistoryByTimeRange(history) {
@@ -2217,7 +2269,6 @@ upload_port = <span id="currentIP2" style="color: #10b981; font-weight: bold;">L
         chartZoom *= delta;
         chartZoom = Math.max(0.5, Math.min(3, chartZoom));
         drawChart(filterHistoryByTimeRange(fullHistoryData));
-      });
     });
 
     // Diagnose-Funktionen
@@ -2429,8 +2480,10 @@ void handleAPI() {
   json += "\"lastUpdate\":" + String(measurements.empty() ? 0 : measurements.back().timestamp) + ",";
   json += "\"timeInitialized\":" + String(timeInitialized ? "true" : "false") + ",";
   json += "\"pollInterval\":" + String(poll_interval / 1000) + ",";
-  json += "\"calorific\":" + String(gas_calorific_value, 2) + ",";
-  json += "\"correction\":" + String(gas_correction_factor, 2) + ",";
+  // backward-compatible key expected by the WebUI
+  json += "\"poll_interval\":" + String(poll_interval / 1000) + ",";
+  json += "\"calorific\":" + String(gas_calorific_value, 6) + ",";
+  json += "\"correction\":" + String(gas_correction_factor, 6) + ",";
   json += "\"system\":{";
   json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
   json += "\"heapSize\":" + String(ESP.getHeapSize()) + ",";
@@ -2470,8 +2523,8 @@ void handleConfigGet() {
   json += "\"mqtt_pass\":\"" + String(mqtt_pass) + "\",";
   json += "\"mqtt_topic\":\"" + String(mqtt_topic) + "\",";
   json += "\"poll_interval\":" + String(poll_interval / 1000) + ",";
-  json += "\"gas_calorific\":" + String(gas_calorific_value, 2) + ",";
-  json += "\"gas_correction\":" + String(gas_correction_factor, 2);
+  json += "\"gas_calorific\":" + String(gas_calorific_value, 6) + ",";
+  json += "\"gas_correction\":" + String(gas_correction_factor, 6);
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -2604,8 +2657,17 @@ void handleErrorReset() {
 }
 
 void handleConfigPost() {
+  Serial.println("DEBUG: handleConfigPost() aufgerufen");
+  Serial.println("DEBUG: hasArg('plain') = " + String(server.hasArg("plain") ? "true" : "false"));
+  Serial.println("DEBUG: args() = " + String(server.args()));
+  
   if (server.hasArg("plain")) {
     String body = server.arg("plain");
+    Serial.println("DEBUG: Body length = " + String(body.length()));
+    // Debug: show incoming POST body (truncated) to help diagnose client-side issues
+    String tb = body;
+    if (tb.length() > 300) tb = tb.substring(0, 300) + "...";
+    Serial.println("DEBUG POST /api/config body: " + tb);
     
     // Einfaches JSON Parsing (fr kleine Daten ausreichend)
     int idx;
@@ -2676,12 +2738,40 @@ void handleConfigPost() {
     
     idx = body.indexOf("\"poll_interval\":");
     if (idx >= 0) {
-      int start = idx + 17;
-      int end = body.indexOf(",", start);
-      if (end < 0) end = body.indexOf("}", start);
-      poll_interval = body.substring(start, end).toInt() * 1000; // Sekunden -> ms
-      if (poll_interval < 10000) poll_interval = 10000; // Minimum 10s
-      if (poll_interval > 3600000) poll_interval = 3600000; // Maximum 1h
+      int start = idx + 16; // Nach "poll_interval":
+      // Überspringe Leerzeichen und Doppelpunkt
+      while (start < body.length() && (body.charAt(start) == ':' || body.charAt(start) == ' ')) start++;
+      
+      int end = start;
+      // Finde das Ende der Zahl (Komma, Leerzeichen oder schließende Klammer)
+      while (end < body.length() && body.charAt(end) >= '0' && body.charAt(end) <= '9') end++;
+      
+      String valueStr = body.substring(start, end);
+      valueStr.trim();
+      int seconds = valueStr.toInt();
+      
+      Serial.println("DEBUG: Parsing poll_interval: start=" + String(start) + " end=" + String(end) + " valueStr='" + valueStr + "' seconds=" + String(seconds));
+      
+      // Akzeptiere nur gültige Bereiche (10s .. 300s). Bei ungültigen/fehlenden Werten
+      // wird der bisherige poll_interval nicht überschrieben.
+      if (seconds >= 10 && seconds <= 300) {
+        Serial.println("DEBUG: poll_interval aus JSON: " + valueStr + " -> " + String(seconds) + " Sekunden");
+        poll_interval = (unsigned long)seconds * 1000UL; // Sekunden -> ms
+        if (poll_interval < 10000UL) poll_interval = 10000UL; // Minimum 10s (safety)
+        if (poll_interval > 300000UL) poll_interval = 300000UL; // Maximum 5min
+        Serial.println("DEBUG: poll_interval nach Validierung: " + String(poll_interval) + " ms");
+
+        // Persistiere sofort, um sicherzustellen dass der Wert vor dem Neustart
+        // in den Preferences steht (reduziert Race-Condition vor saveConfig()).
+        preferences.begin("gas-config", false);
+        size_t written = preferences.putULong("poll_interval", poll_interval);
+        // Readback prüfen vor end() - end() schreibt automatisch in Flash
+        unsigned long rb = preferences.getULong("poll_interval", 0);
+        preferences.end(); // end() committet automatisch
+        Serial.println("DEBUG: poll_interval sofort in Flash geschrieben: " + String(poll_interval) + " ms (written=" + String(written) + " readback=" + String(rb) + ")");
+      } else {
+        Serial.println("DEBUG: poll_interval ungültig oder nicht gesetzt im JSON ('" + valueStr + "'), beibehalten: " + String(poll_interval) + " ms");
+      }
     }
     
     idx = body.indexOf("\"gas_calorific\":");
@@ -2850,7 +2940,7 @@ void setup() {
     strcpy(mqtt_server, "192.168.178.1");
     mqtt_port = 1883;
     strcpy(mqtt_topic, "gaszaehler/verbrauch");
-    poll_interval = 60000;
+    poll_interval = 30000;
     
     delay(1000); // Warten damit Button losgelassen werden kann
   }
@@ -3012,8 +3102,8 @@ void loop() {
             char payload[16];
             dtostrf(volume, 0, 2, payload);
             
-            // Volumen publishen
-            if (client.publish(mqtt_topic, payload)) {
+            // Volumen publishen (retained so Home Assistant always has latest state)
+            if (client.publish(mqtt_topic, payload, true)) {
               Serial.print("Verbrauch gesendet: ");
               Serial.println(payload);
               addLog("M-Bus: Verbrauch OK - " + String(payload) + " m³");
@@ -3027,7 +3117,7 @@ void loop() {
               Serial.print("Energie gesendet: ");
               Serial.print(energy_payload);
               Serial.println(" kWh");
-              addLog("MQTT: Energie - " + String(energy_payload) + " kWh (Zählerstand: " + String(payload) + " m³, Brennwert: " + String(gas_calorific_value, 2) + ", Z-Zahl: " + String(gas_correction_factor, 4) + ")");
+              addLog("MQTT: Energie - " + String(energy_payload) + " kWh (Zählerstand: " + String(payload) + " m³, Brennwert: " + String(gas_calorific_value, 6) + ", Z-Zahl: " + String(gas_correction_factor, 6) + ")");
               
               // Additional HA sensors (nach Energy-Publish)
               String wifiTopic = String(mqtt_topic) + "_wifi";
@@ -3072,3 +3162,6 @@ void loop() {
       break;
   }
 }
+
+
+
