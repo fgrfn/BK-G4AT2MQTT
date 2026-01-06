@@ -239,27 +239,8 @@ Nach dem ersten Flash:
 ## 🌐 WebUI Übersicht
 
 ### Dashboard (`http://[ESP32-IP]`)
-![alt text](Screenshot.png)
 ```
-╔════════════════════════════════════════════╗
-║  📊 Gaszähler Monitor                     ║
-║  ----------------------------------------  ║
-║  💧 Verbrauch:    1234.56 m³              ║
-║  ⚡ Energie:      12345.6 kWh (10.0 kWh/m)║
-║  ----------------------------------------  ║
-║  📡 WiFi:         ✓ Verbunden (-45 dBm)   ║
-║  🔗 MQTT:         ✓ Verbunden             ║
-║  ⏱  Uptime:       12d 5h 23m              ║
-║  🔄 Letzte Messung: vor 2 Minuten         ║
-║  ⏳ Poll-Intervall: 60s                   ║
-║  ----------------------------------------  ║
-║  📈 Verlaufs-Chart (Interaktiv)           ║
-║  [Chart mit Zoom, Pan, Tooltips]          ║
-║  ----------------------------------------  ║
-║  ⚠️ Fehlerstatistik                       ║
-║  M-Bus Timeouts: 2 | Parse-Fehler: 0     ║
-║  MQTT Fehler: 0 | WiFi Drops: 1           ║
-╚════════════════════════════════════════════╝
+![alt text](Screenshot.png)
 ```
 
 ### Konfiguration
