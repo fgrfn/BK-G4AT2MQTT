@@ -1,267 +1,701 @@
-# BK-G4AT2MQTT
+# 🏭 BK-G4AT2MQTT - ESP32 Gaszähler Gateway
 
 > **Original Projekt von [BennoB666](https://github.com/BennoB666/BK-G4AT2MQTT)**  
-> Dieser Fork enthält erweiterte Features für eine verbesserte Benutzerfreundlichkeit und Home Assistant Integration.
+> Dieser Fork wurde massiv erweitert mit professioneller WebUI, Live-Monitoring und umfangreichen Features.
 
-Ein ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines Honeywell BK-G4AT Gaszählers und Übertragung der Daten an einen MQTT Server.
+Ein leistungsstarkes ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines **Honeywell BK-G4AT Gaszählers** mit vollständiger MQTT Integration und moderner Web-Oberfläche.
+
+[![Version](https://img.shields.io/badge/Version-2.0.0-brightgreen.svg)](https://github.com/YOUR-USERNAME/BK-G4AT2MQTT/releases)
+[![Platform](https://img.shields.io/badge/ESP32-DevKit%20V1-blue.svg)](https://www.espressif.com/en/products/socs/esp32)
+[![Framework](https://img.shields.io/badge/Arduino-Framework-teal.svg)](https://www.arduino.cc/)
+[![MQTT](https://img.shields.io/badge/MQTT-3.1.1-orange.svg)](https://mqtt.org/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Compatible-green.svg)](https://www.home-assistant.io/)
+[![Chart.js](https://img.shields.io/badge/Chart.js-4.4.0-ff6384.svg)](https://www.chartjs.org/)
 
 ---
 
-## 📖 Original README
+## 📑 Inhaltsverzeichnis
 
-### Hardware Setup
+- [Features](#-features)
+- [Hardware Setup](#-hardware-setup)
+- [Installation](#-installation)
+- [WebUI Übersicht](#-webui-übersicht)
+- [Home Assistant Integration](#-home-assistant-integration)
+- [Konfiguration](#-konfiguration)
+- [OTA Updates](#-ota-updates)
+- [Fehlersuche](#-fehlersuche)
+- [Technische Details](#-technische-details)
 
-Verbinden Sie den ESP32 wie im Bild gezeigt:
+---
+
+## ✨ Features
+
+### 🎨 Moderne Web-Oberfläche
+
+**Professionelles Glasmorphism Design** mit Dark/Light Mode
+
+- **Dashboard**
+  - Live-Anzeige: Gasverbrauch (m³) und Energie (kWh)
+  - **Interaktiver Chart.js Verlaufs-Chart**
+    - Professionelle Zeitachsen mit Auto-Skalierung
+    - Zoom & Pan Funktionen
+    - Zeitbereiche: 24h, 7 Tage, 30 Tage, Alle
+    - Responsive Tooltips mit deutschen Datumsformaten
+    - Smooth Linien mit Gradientenfillung
+  - System-Status (WiFi, MQTT, Uptime)
+  - M-Bus Statistiken & Erfolgsrate
+  - Letzte Messungen Historie
+
+- **Konfiguration**
+  - WiFi & MQTT Einstellungen über WebUI
+  - Brennwert & Z-Zahl Konfiguration
+  - Poll-Intervall (10-3600s)
+  - Statische IP (optional)
+  - Keine Code-Änderungen nötig!
+
+- **Live Logs** ⭐ NEU in v2.0
+  - Echtzeit-Logging aller Ereignisse
+  - **Hex-Dump** der M-Bus Rohdaten für Debugging
+  - **Detaillierte Berechnungsanzeige** (Zählerstand, Brennwert, Z-Zahl)
+  - Farbcodiert nach Typ (ESP, MQTT, M-Bus)
+  - Icons für Status (✓ ❌ ⚠)
+  - Auto-Refresh alle 3 Sekunden
+  - Beispiel:
+    ```
+    M-Bus: Rohdaten - 68 1F 1F 68 08 00 72 43 53 69 26...
+    MQTT: Energie - 83763.2 kWh (Zählerstand: 8451.83 m³, Brennwert: 10.36, Z-Zahl: 0.9607)
+    ```
+
+- **Netzwerk-Diagnose**
+  - MQTT Verbindungstest
+  - WiFi Signal & Qualität
+  - Gateway Ping Test
+  - **M-Bus Statistiken** mit durchschnittlicher Antwortzeit
+  - **Fehlerstatistik-Reset** Button (löscht Fehlerzähler)
+  - **System-Informationen** (Heap, Flash, Chip-Modell)
+  - CSV Export der Historie
+
+- **Firmware Update**
+  - OTA via PlatformIO
+  - Anleitung mit aktueller IP
+  - USB-Fallback Option
+
+### 🏠 Home Assistant Integration
+
+- **MQTT Auto-Discovery** - Automatische Erkennung ohne YAML
+- **5 Sensoren** werden automatisch angelegt:
+  - `sensor.esp32_gaszaehler_zaehlerstand` - Gasverbrauch (m³)
+  - `sensor.esp32_gaszaehler_gasverbrauch` - Energie (kWh) für Energy Dashboard
+  - `sensor.esp32_gaszaehler_wifi` - WiFi Signal (dBm)
+  - `sensor.esp32_gaszaehler_mbus` - M-Bus Erfolgsrate (%)
+  - `binary_sensor.esp32_gaszaehler_online` - Verfügbarkeitsstatus
+- **Energy Dashboard** kompatibel (`state_class: total_increasing`)
+- **Availability Tracking** mit Last Will Testament
+- **Brennwert-Berechnung** - Automatische kWh Konvertierung
+- **Gerät im MQTT Device Registry** mit allen Sensoren gruppiert
+
+### 📊 Erweiterte Energie-Funktionen
+
+- **Brennwert-Umrechnung** (m³ → kWh)
+- **Z-Zahl Korrekturfaktor** für präzise Messungen
+- **Konfigurierbar** über WebUI (Standard: 10.0 kWh/m³)
+- **Separate MQTT Topics** für Volumen und Energie
+- **Persistente Speicherung** von bis zu 50 Messungen
+
+### 🔧 System-Features
+
+- **WiFi Access Point Modus**
+  - Automatisch bei fehlender Konfiguration
+  - SSID: `ESP32-GasZaehler`
+  - Fallback nach 15s bei Verbindungsproblemen
+
+- **NTP Zeit-Synchronisation**
+  - Echte Zeitstempel für alle Messungen
+  - Automatische Sommer-/Winterzeit (Europa)
+  - Server: `de.pool.ntp.org`
+
+- **Persistenter Speicher**
+  - Konfiguration im Flash gespeichert
+  - Messungen-Historie überlebt Neustarts
+  - Automatisches Speichern alle 10 Messungen
+
+- **Memory Management**
+  - Automatische Ringbuffer-Verwaltung
+  - Memory-Leak Schutz
+  - Live Heap Monitoring
+
+- **Fehlerbehandlung**
+  - Detailliertes Error-Tracking
+  - Automatisches Recovery
+  - Statistiken: Timeouts, Parse-Fehler, Verbindungsprobleme
+
+### 🎨 UI/UX Verbesserungen
+
+- **Dark Mode als Standard** (umschaltbar)
+- **Weißer Titel** statt Gradient für bessere Lesbarkeit
+- **Responsive Design** für alle Geräte
+- **CSS Animationen** (Fade-in, Slide-in, Pulse)
+- **Farbcodierte Status-Anzeigen**
+- **Progress Bars** für Erfolgsraten
+- **Reorganisierte UI**: System-Info und Fehlerstatistik in Diagnose-Seite
+- **Chart.js Integration** für professionelle Visualisierung
+- **Accessibility** optimiert
+
+---
+
+## 🔌 Hardware Setup
+
+### Benötigte Komponenten
+
+- **ESP32 DevKit V1** (empfohlen) oder ESP32-C3
+- **M-Bus Interface** (5V, UART)
+- **Honeywell BK-G4AT** Gaszähler mit M-Bus
+
+### Verkabelung
 
 <img width="600" height="800" alt="wires" src="https://github.com/user-attachments/assets/be611be3-ce91-446a-a3be-2242b5ae99b2" />
 
-| ESP32 Pin | M-Bus Interface |
-|-----------|-----------------|
-| TX2 (GPIO17) | TX |
-| RX2 (GPIO16) | RX |
-| GND | GND |
-| 5V | VCC |
+| ESP32 Pin | M-Bus Interface | Beschreibung |
+|-----------|-----------------|--------------|
+| **TX2** (GPIO17) | TX | UART Transmit |
+| **RX2** (GPIO16) | RX | UART Receive |
+| **GND** | GND | Masse |
+| **5V** | VCC | Spannungsversorgung |
 
-### Original Features
-
-- ESP32-C3 Super Mini liest die M-Bus Schnittstelle
-- Übertragung der Daten an einen MQTT Server
-- OTA Updates über WLAN
-
-**Original Konfiguration:**  
-Im `src`-Ordner mussten folgende Werte angepasst werden: `ssid`, `password`, `mqtt_server`, `mqtt_port`, `mqtt_topic`. Das `MBUS_POLL_INTERVAL` ist das Update-Intervall in Millisekunden.
-
-**OTA Setup:**  
-In der `platformio.ini` kann die ESP32 IP-Adresse unter `upload_port = 192.168.178.20` angegeben werden für Updates über WLAN.
+**Hinweis:** GPIO16/17 = UART2, Baudrate: 2400, 8E1 (8 Data, Even Parity, 1 Stop)
 
 ---
 
-## 🚀 Erweiterungen in diesem Fork
+## 🚀 Installation
 
-Dieser Fork erweitert das Original-Projekt um zahlreiche Features für eine deutlich verbesserte Benutzerfreundlichkeit und professionelle Home Assistant Integration.
+### 1. PlatformIO einrichten
 
-### ✨ Neue Features
-
-#### 🌐 Modernes WebUI
-- **Dashboard** mit Live-Anzeige des aktuellen Gasverbrauchs
-- **Verlaufs-Chart** der letzten 50 Messungen
-- **System-Status** Übersicht (WLAN, MQTT, Uptime)
-- **Fehlerstatistik** mit detailliertem Logging
-- **Responsive Design** für Desktop und Mobile
-
-#### ⚙️ Web-basierte Konfiguration
-- **Keine Code-Änderungen** mehr nötig
-- **Konfigurationsseite** im WebUI
-- Einstellbar:
-  - WLAN Zugangsdaten
-  - MQTT Server IP & Port
-  - MQTT Topic
-  - Poll-Intervall (10-3600 Sekunden)
-- **Persistente Speicherung** im Flash
-- **Automatischer Neustart** nach Konfiguration
-
-#### 📡 WiFi Fallback/Access Point Modus
-- **Automatischer AP-Modus** bei fehlender WLAN-Konfiguration
-- **Fallback** nach 15 Sekunden bei Verbindungsproblemen
-- **Erstkonfiguration** ohne USB-Verbindung möglich
-- AP-Zugangsdaten:
-  - SSID: `ESP32-GasZaehler`
-  - Passwort: `12345678`
-  - IP: `192.168.4.1`
-
-#### 🏠 Home Assistant Auto-Discovery
-- **Automatische Erkennung** ohne YAML-Konfiguration
-- **MQTT Discovery** mit allen notwendigen Attributen
-- **Device Class:** `gas` für korrekte Icons
-- **State Class:** `total_increasing` für Energie-Dashboard
-- **Availability Topic** für Online/Offline Status
-- **Last Will Testament** für automatische Offline-Erkennung
-
-#### 🕐 NTP Zeit-Synchronisation
-- **Automatische Zeitsynchronisation** beim Start
-- **Echte Zeitstempel** für Messungen
-- **Anzeige** als Uhrzeit im WebUI
-- Server: `pool.ntp.org` (UTC+1 mit Sommerzeit)
-
-#### 🚨 Status-LED (GPIO2)
-- **Visuelles Feedback** ohne Serial Monitor
-- **Sehr schnell blinken** (100ms): Access Point Modus
-- **Schnell blinken** (200ms): WLAN Problem
-- **Mittel blinken** (500ms): MQTT Problem
-- **Langsam blinken** (2s): Alles OK
-
-#### 📈 Detailliertes Error-Logging
-- **Fehlerstatistik** im WebUI
-- Tracking von:
-  - M-Bus Timeouts
-  - M-Bus Parse-Fehler
-  - MQTT Fehler
-  - WLAN Trennungen
-- **Letzter Fehler** mit Meldung
-- **Serial Monitor** Logging
-
-#### 🔧 Weitere Verbesserungen
-- **ESP32 DevKit V1** Support (zusätzlich zum ESP32-C3)
-- **Größerer MQTT Buffer** (512 Bytes) für Discovery
-- **Konfigurierbares Poll-Intervall**
-- **MQTT Availability** für Home Assistant
-- **Fehlerbehandlung** und automatisches Recovery
-
----
-
-## 🚀 Installation & Einrichtung
-
-### 1. Hardware vorbereiten
-- ESP32 DevKit V1 oder ESP32-C3 verwenden
-- M-Bus Interface wie oben beschrieben verkabeln
-
-### 2. Firmware flashen
 ```bash
-# PlatformIO
+# Repository klonen
+git clone https://github.com/YOUR-USERNAME/BK-G4AT2MQTT.git
+cd BK-G4AT2MQTT
+
+# Dependencies werden automatisch installiert
+pio run
+```
+
+### 2. Firmware flashen (USB)
+
+```bash
+# Kompilieren und Upload
+pio run -t upload
+
+# Mit Serial Monitor
+pio run -t upload -t monitor
+```
+
+### 3. Erstkonfiguration (Access Point)
+
+Nach dem ersten Flash:
+
+1. **ESP32 startet im AP-Modus**
+   - LED blinkt sehr schnell (100ms)
+   - SSID: `ESP32-GasZaehler` erscheint
+
+2. **Mit AP verbinden**
+   - Passwort: `12345678`
+   - Automatische IP: `192.168.4.1`
+
+3. **WebUI öffnen**
+   - Browser: `http://192.168.4.1`
+   - **Konfiguration** Tab öffnen
+
+4. **Einstellungen eingeben**
+   ```
+   WiFi:
+   ├─ SSID: [Ihr WLAN Name]
+   ├─ Passwort: [Ihr WLAN Passwort]
+   └─ Hostname: ESP32-GasZaehler
+   
+   MQTT:
+   ├─ Server: [MQTT Broker IP]
+   ├─ Port: 1883
+   ├─ Username: (optional)
+   ├─ Passwort: (optional)
+   └─ Topic: gaszaehler/verbrauch
+   
+   Gas-Konfiguration:
+   ├─ Brennwert: 10.0 kWh/m³
+   ├─ Z-Zahl: 1.0
+   └─ Poll-Intervall: 60 Sekunden
+   ```
+
+5. **Speichern & Neustart**
+   - ESP32 startet neu
+   - Verbindet sich mit WLAN
+   - IP-Adresse in Serial Console / Logs
+
+6. **Zugriff über WLAN**
+   - `http://[ESP32-IP]` oder
+   - `http://ESP32-GasZaehler.local` (mDNS)
+
+---
+
+## 🌐 WebUI Übersicht
+
+### Dashboard (`http://[ESP32-IP]`)
+
+```
+╔════════════════════════════════════════════╗
+║  📊 Gaszähler Monitor                     ║
+║  ----------------------------------------  ║
+║  💧 Verbrauch:    1234.56 m³              ║
+║  ⚡ Energie:      12345.6 kWh (10.0 kWh/m)║
+║  ----------------------------------------  ║
+║  📡 WiFi:         ✓ Verbunden (-45 dBm)   ║
+║  🔗 MQTT:         ✓ Verbunden             ║
+║  ⏱  Uptime:       12d 5h 23m              ║
+║  🔄 Letzte Messung: vor 2 Minuten         ║
+║  ⏳ Poll-Intervall: 60s                   ║
+║  ----------------------------------------  ║
+║  📈 Verlaufs-Chart (Interaktiv)           ║
+║  [Chart mit Zoom, Pan, Tooltips]          ║
+║  ----------------------------------------  ║
+║  ⚠️ Fehlerstatistik                       ║
+║  M-Bus Timeouts: 2 | Parse-Fehler: 0     ║
+║  MQTT Fehler: 0 | WiFi Drops: 1           ║
+╚════════════════════════════════════════════╝
+```
+
+### Konfiguration
+
+Alle Einstellungen editierbar:
+- WiFi Credentials (SSID, Passwort, Hostname)
+- Statische IP (optional)
+- MQTT Server (IP, Port, Auth, Topic)
+- Gas-Parameter (Brennwert, Z-Zahl)
+- Poll-Intervall (10-3600s)
+- WiFi Scanner für verfügbare Netzwerke
+
+### Live Logs
+
+```
+[14:32:15] (1245s) 🚀 ESP32 Boot - System Start
+[14:32:16] (1246s) 📶 WiFi verbunden: 10.10.40.109
+[14:32:17] (1247s) 🔗 MQTT: Verbunden!
+[14:32:45] (1275s) 📡 M-Bus: Poll gestartet
+[14:32:47] (1277s) 📡 M-Bus: Antwort erhalten (42 Bytes, 156ms)
+[14:32:47] (1277s) 📡 M-Bus: Rohdaten - 68 1F 1F 68 08 00 72 43 53 69...
+[14:32:47] (1277s) 📡 M-Bus: Verbrauch OK - 1234.56 m³
+[14:32:48] (1278s) 🔗 MQTT: Energie - 12345.6 kWh (Zählerstand: 1234.56 m³, Brennwert: 10.0, Z-Zahl: 1.0)
+```
+
+Farben:
+- 🚀 **Blau** - System/Boot
+- 📶 **Blau** - WiFi
+- 🔗 **Cyan** - MQTT
+- 📡 **Lila** - M-Bus
+- ✓ **Grün** - Erfolg
+- ❌ **Rot** - Fehler
+- ⚠ **Gelb** - Warnung
+
+**NEU in v2.0:**
+- **Hex-Dump** zeigt erste 32 Bytes der M-Bus Rohdaten
+- **Berechnungsdetails** bei MQTT Energie-Übertragung (zeigt Zählerstand, Brennwert, Z-Zahl)
+
+### Netzwerk-Diagnose
+
+**Tests verfügbar:**
+- MQTT Verbindung (Server, Port, Auth, Antwortzeit)
+- WiFi Status (Signal, Qualität, Kanal, MAC)
+- Gateway Ping (Erreichbarkeit, Latenz, DNS)
+- M-Bus Statistiken (Erfolgsrate, Ø Antwortzeit, Letzter Hex-Dump)
+- **System-Informationen** (Heap, Flash, Sketch, Chip-Modell)
+- **Fehlerstatistik** mit Reset-Button (löscht alle Fehlerzähler)
+- CSV Export (Historie aller Messungen)
+
+**API Endpoints:**
+- `GET /api/diagnostics` - M-Bus Statistiken als JSON
+- `POST /api/errors/reset` - Fehlerstatistik zurücksetzen
+- `POST /api/mbus/trigger` - Manuelle M-Bus Abfrage triggern
+
+---
+
+## 🏠 Home Assistant Integration
+
+### Automatische Einrichtung
+
+Das Gateway sendet automatisch MQTT Discovery Nachrichten:
+
+**MQTT Discovery Topics:**
+```
+homeassistant/sensor/esp32_gaszaehler_zaehlerstand/config
+homeassistant/sensor/esp32_gaszaehler_gasverbrauch/config
+homeassistant/sensor/esp32_gaszaehler_wifi/config
+homeassistant/sensor/esp32_gaszaehler_mbus/config
+homeassistant/binary_sensor/esp32_gaszaehler_online/config
+```
+
+**Konfiguration:**
+
+Nach dem ersten MQTT Connect erscheinen automatisch:
+
+1. **Einstellungen** → **Geräte & Dienste** → **MQTT**
+2. Device: **ESP32 Gaszähler**
+3. Sensoren:
+   - `sensor.esp32_gaszaehler_zaehlerstand` - Verbrauch (m³)
+   - `sensor.esp32_gaszaehler_gasverbrauch` - Energie (kWh)
+   - `sensor.esp32_gaszaehler_wifi` - WiFi RSSI (dBm)
+   - `sensor.esp32_gaszaehler_mbus` - M-Bus Erfolgsrate (%)
+   - `binary_sensor.esp32_gaszaehler_online` - Online Status
+
+### Energy Dashboard
+
+**Energie-Sensor hinzufügen:**
+
+1. **Einstellungen** → **Dashboards** → **Energie**
+2. **Gas-Verbrauch** hinzufügen
+3. Sensor auswählen: `sensor.esp32_gaszaehler_gasverbrauch`
+4. Einheit: kWh
+5. Fertig! Dashboard zeigt jetzt Gasverbrauch
+
+**Dashboard Karte:**
+
+```yaml
+type: entities
+title: Gasverbrauch
+entities:
+  - entity: sensor.esp32_gaszaehler_zaehlerstand
+    name: Verbrauch
+    icon: mdi:meter-gas
+  - entity: sensor.esp32_gaszaehler_gasverbrauch
+    name: Energie
+    icon: mdi:lightning-bolt
+  - entity: sensor.esp32_gaszaehler_wifi
+    name: WiFi Signal
+  - entity: sensor.esp32_gaszaehler_mbus
+    name: M-Bus Qualität
+  - entity: binary_sensor.esp32_gaszaehler_online
+    name: Status
+```
+
+**Verlaufs-Graph:**
+
+```yaml
+type: history-graph
+title: Gas Verlauf (7 Tage)
+entities:
+  - entity: sensor.esp32_gaszaehler_gasverbrauch
+hours_to_show: 168
+refresh_interval: 0
+```
+
+### MQTT Topics
+
+| Topic | Beschreibung | Wert | Einheit |
+|-------|--------------|------|---------|
+| `gaszaehler/verbrauch` | Gasvolumen | `1234.56` | m³ |
+| `gaszaehler/verbrauch_energy` | Energie | `12345.6` | kWh |
+| `gaszaehler/verbrauch_wifi` | WiFi Signal | `-45` | dBm |
+| `gaszaehler/verbrauch_mbus_rate` | M-Bus Rate | `98.5` | % |
+| `gaszaehler/availability` | Status | `online`/`offline` | - |
+
+**Hinweis:** Topics sind über WebUI Konfiguration änderbar (Base Topic: `gaszaehler/verbrauch`)
+
+---
+
+## ⚙️ Konfiguration
+
+### Brennwert & Z-Zahl
+
+**Brennwert (Heizwert):**
+- Typisch: 8.0 - 12.0 kWh/m³
+- Abhängig von Gasqualität
+- Wird vom Gasversorger mitgeteilt
+- Formel: `Energie (kWh) = Volumen (m³) × Brennwert × Z-Zahl`
+
+**Z-Zahl (Zustandszahl):**
+- Typisch: 0.95 - 1.00
+- Korrigiert Druck & Temperatur
+- Standard: 1.0 (wenn unbekannt)
+
+**Einstellung im WebUI:**
+1. **Konfiguration** Tab öffnen
+2. Sektion **Gas-Konfiguration**
+3. Werte eingeben
+4. **Speichern & Neustart**
+
+### Statische IP (optional)
+
+```
+Statische IP: [ ] Verwenden
+IP-Adresse:   192.168.1.100
+Gateway:      192.168.1.1
+Subnetz:      255.255.255.0
+DNS:          192.168.1.1
+```
+
+### MQTT Authentifizierung
+
+```
+MQTT Username: [optional]
+MQTT Passwort: [optional]
+```
+
+Leer lassen für Broker ohne Auth.
+
+---
+
+## 🔄 OTA Updates
+
+### Via PlatformIO (empfohlen)
+
+**Methode 1: Terminal**
+```bash
+pio run -t upload --upload-port 10.10.40.109
+```
+
+**Methode 2: platformio.ini**
+```ini
+[env:esp32dev]
+upload_protocol = espota
+upload_port = 10.10.40.109  ; ESP32 IP-Adresse
+```
+
+Dann einfach:
+```bash
 pio run -t upload
 ```
 
-### 3. Erste Konfiguration (Access Point Modus)
+### WebUI Anleitung
 
-Nach dem ersten Flash startet der ESP32 automatisch im AP-Modus:
+Das WebUI zeigt unter **Firmware Update** die aktuelle IP und Befehle an.
 
-1. **Mit WiFi verbinden:**
-   - SSID: `ESP32-GasZaehler`
-   - Passwort: `12345678`
+**Port:** ArduinoOTA läuft auf Port **3232**
 
-2. **WebUI öffnen:**
-   - Browser: `http://192.168.4.1`
+---
 
-3. **Konfiguration eingeben:**
-   - Tab **"Konfiguration"** öffnen
-   - WLAN Zugangsdaten eingeben
-   - MQTT Server IP & Port eingeben
-   - Optional: Topic und Poll-Intervall anpassen
-   - **Speichern & Neustart**
+## 🔍 Fehlersuche
 
-4. **Nach Neustart:**
-   - ESP32 verbindet sich mit WLAN
-   - IP-Adresse im Serial Monitor angezeigt
-   - WebUI unter neuer IP erreichbar
+### Problem: Keine WLAN-Verbindung
 
-### 4. Home Assistant Integration
+**Symptom:** LED blinkt schnell (200ms)
 
-**Automatische Einrichtung:**
-1. MQTT Broker in Home Assistant konfiguriert haben
-2. Nach ESP32-Konfiguration erscheint Sensor automatisch
-3. Unter **Einstellungen** → **Geräte & Dienste** → **MQTT**
-4. Device: **"ESP32 Gaszähler"**
+**Lösung:**
+1. WLAN Zugangsdaten im WebUI prüfen
+2. Router-Kompatibilität (2.4 GHz, WPA2)
+3. Signal-Stärke im Diagnose-Tool prüfen
+4. Factory Reset: BOOT-Button beim Start gedrückt halten
 
-**Dashboard Karte:**
-```yaml
-type: entity
-entity: sensor.gaszahler
-name: Gasverbrauch
-icon: mdi:meter-gas
+### Problem: Keine MQTT-Verbindung
+
+**Symptom:** LED blinkt mittel (500ms)
+
+**Lösung:**
+1. MQTT Broker IP & Port prüfen
+2. Firewall-Regeln prüfen (Port 1883)
+3. MQTT Auth Credentials prüfen
+4. Diagnose → MQTT Test ausführen
+
+### Problem: Keine M-Bus Daten
+
+**Symptom:** `M-Bus Timeout` in Logs
+
+**Lösung:**
+1. Verkabelung prüfen (TX↔RX, RX↔TX)
+2. 5V Stromversorgung ausreichend?
+3. M-Bus Interface funktionsfähig?
+4. Gaszähler M-Bus Schnittstelle aktiviert?
+5. Diagnose → M-Bus Stats → Hex-Dump prüfen
+
+### Serial Monitor Logging
+
+```bash
+# PlatformIO Serial Monitor
+pio device monitor -b 115200
+
+# Farbige Ausgabe mit ANSI-Codes
 ```
 
-**Energie-Dashboard:**
-Der Sensor kann direkt im Energie-Dashboard verwendet werden (`state_class: total_increasing`).
+**Wichtige Log-Meldungen:**
+- `ESP32 Boot - System Start` - System gestartet
+- `WiFi verbunden: [IP]` - WLAN OK
+- `MQTT: Verbunden!` - Broker OK
+- `M-Bus: Verbrauch OK` - Messung erfolgreich
+
+### Factory Reset
+
+**BOOT-Button beim Einschalten gedrückt halten:**
+```
+*** CONFIG RESET ERKANNT ***
+Konfiguration gelöscht!
+Starte im Access Point Modus...
+```
+
+Danach neu konfigurieren über AP.
 
 ---
 
-## 🌐 WebUI
+## 📊 Technische Details
 
-Aufruf: `http://[ESP32-IP-Adresse]`
+### System-Spezifikationen
 
-### Dashboard
-- Aktueller Verbrauch in m³
-- WLAN & MQTT Status (online/offline)
-- Uptime und letzte Messung
-- Poll-Intervall Anzeige
-- Fehlerstatistik mit Details
-- Verlaufs-Chart der Messungen
+| Parameter | Wert |
+|-----------|------|
+| **Microcontroller** | ESP32 (240 MHz Dual-Core) |
+| **Flash** | 4 MB |
+| **RAM** | 520 KB |
+| **WiFi** | 802.11 b/g/n (2.4 GHz) |
+| **UART** | UART2 (GPIO16/17), 2400 Baud, 8E1 |
+| **WebServer** | Port 80 |
+| **OTA** | Port 3232 (ArduinoOTA) |
+| **MQTT** | 3.1.1 (PubSubClient) |
 
-### Konfiguration
-- WLAN Einstellungen
-- MQTT Server, Port & Topic
-- Poll-Intervall (10-3600s)
-- Speichern mit automatischem Neustart
+### M-Bus Protokoll
 
----
+- **Baudrate:** 2400 bps
+- **Format:** 8 Data Bits, Even Parity, 1 Stop Bit (8E1)
+- **Poll Frame:** `10 5B 00 5B 16` (Hex)
+- **Response Timeout:** 1000ms
+- **Max Buffer:** 256 Bytes
 
-## 📡 MQTT Topics
+### Speicher-Management
 
-### Published Topics
-- **Verbrauch:** `gaszaehler/verbrauch` (Wert in m³)
-- **Availability:** `gaszaehler/verbrauch_availability` (online/offline)
+- **Konfiguration:** Preferences (Flash NVS)
+- **Messungen:** Ringbuffer (50 Einträge)
+- **Logs:** Ringbuffer (50 Einträge)
+- **Auto-Persist:** Alle 10 Messungen
+- **Memory Check:** Jede Minute
 
-### Home Assistant Discovery
-- **Topic:** `homeassistant/sensor/gaszaehler/config`
-- Automatisch beim MQTT-Connect gesendet
+### Software-Architektur
 
----
+```
+ESP32 Firmware
+├── Main Loop (Nicht-blockierend)
+│   ├── WiFi Management
+│   ├── MQTT Client
+│   ├── M-Bus State Machine
+│   ├── ArduinoOTA Handler
+│   └── WebServer Handler
+├── WebUI (Embedded HTML/CSS/JS)
+│   ├── Dashboard (Live Updates)
+│   ├── Configuration (Persistent)
+│   ├── Live Logs (Auto-Refresh)
+│   ├── Diagnostics (Tests)
+│   └── Firmware Update (OTA)
+└── Libraries
+    ├── WiFi (ESP32 Core)
+    ├── PubSubClient (MQTT)
+    ├── ArduinoOTA
+    ├── ESPmDNS
+    ├── Preferences (NVS)
+    └── ESP32Ping
+```
 
-## 🔧 Unterstützte Boards
+### Dependencies (platformio.ini)
 
-- **ESP32 DevKit V1** (empfohlen) - `board = esp32dev`
-- **ESP32-C3 DevKit** - `board = esp32-c3-devkitm-1`
-
-Anpassung in `platformio.ini`:
 ```ini
-[env:esp32dev]
-platform = espressif32
-board = esp32dev
-framework = arduino
+lib_deps = 
+    knolleary/PubSubClient@^2.8
+    mobizt/ESP32 Ping@^1.0
+
+; Chart.js wird via CDN geladen (kein PlatformIO Dependency)
+; https://cdn.jsdelivr.net/npm/chart.js@4.4.0
+; https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0
 ```
 
----
+### Compiler-Optimierungen
 
-## 🛠️ Fehlersuche
-
-### WebUI Fehlerstatistik
-Öffnen Sie das Dashboard → "Fehlerstatistik" zeigt:
-- M-Bus Timeouts
-- Parse-Fehler
-- MQTT Verbindungsfehler
-- WLAN Trennungen
-- Letzter Fehler mit Beschreibung
-
-### Serial Monitor
-- Baudrate: **115200**
-- Detailliertes Logging aller Aktionen
-- AP-Modus Details beim Start
-- IP-Adressen und Verbindungsstatus
-
-### Status-LED Codes
-- **100ms Blinken:** AP-Modus aktiv → Konfiguration erforderlich
-- **200ms Blinken:** WLAN Problem → Zugangsdaten prüfen
-- **500ms Blinken:** MQTT Problem → Broker IP prüfen
-- **2s Blinken:** Alles OK
-
-### WiFi Fallback
-Bei WLAN-Problemen:
-- Nach 15s automatischer AP-Modus
-- Erneute Konfiguration möglich
-- LED blinkt sehr schnell als Hinweis
+- **Partition Scheme:** Default (1.2 MB App / 1.5 MB SPIFFS)
+- **Build Flags:** `-DCORE_DEBUG_LEVEL=0` (Release)
+- **Monitor Speed:** 115200 Baud
+- **Flash Frequency:** 80 MHz
 
 ---
 
-## 📝 Technische Details
+## 🎯 Roadmap & Changelog
 
-- **Plattform:** ESP32 (Arduino Framework)
-- **M-Bus:** UART2 (GPIO16/17), 2400 Baud, 8E1
-- **MQTT:** PubSubClient mit LWT (Last Will Testament)
-- **WebServer:** Port 80
-- **NTP:** pool.ntp.org (UTC+1 + Sommerzeit)
-- **Config Storage:** Preferences (Flash)
-- **OTA:** ArduinoOTA über WLAN
+### ✅ Version 2.0.0 (Januar 2026)
+
+**Neue Features:**
+- ✅ **Chart.js Integration** - Professionelle Zeitachsen-Visualisierung
+  - Auto-Skalierung (Stunden/Tage/Monate)
+  - Smooth Linien mit Gradient
+  - Interaktive Tooltips
+  - Zeitbereich-Filter (24h/7d/30d/Alle)
+- ✅ **Enhanced Live Logs** - Detailliertes Debugging
+  - Hex-Dump der M-Bus Rohdaten (erste 32 Bytes)
+  - Berechnungsdetails bei MQTT Übertragung
+  - Zeigt Zählerstand, Brennwert, Z-Zahl
+- ✅ **Reorganisierte UI** - Bessere Übersichtlichkeit
+  - System-Informationen in Diagnose-Seite verschoben
+  - Fehlerstatistik in Diagnose-Seite verschoben
+  - Reset-Button für Fehlerstatistik
+- ✅ **Weißer Titel** - Bessere Dark Mode Lesbarkeit
+- ✅ **API Endpoints** - RESTful Schnittstellen
+  - `/api/diagnostics` - M-Bus Stats JSON
+  - `/api/errors/reset` - Fehler zurücksetzen
+  - `/api/mbus/trigger` - Manuelle Abfrage
+- ✅ **Home Assistant Discovery** - Optimiert
+  - 5 Sensoren (inkl. Binary Sensor für Online Status)
+  - Korrekte Entity IDs (`esp32_gaszaehler_*`)
+  - Cleanup alter/doppelter Entities
+
+### Version 1.x (Original Features)
+- Dashboard mit Live-Anzeigen
+- WebUI Konfiguration
+- MQTT Integration
+- M-Bus Auslesen
+- WiFi Manager
+- OTA Updates
+
+### 🔮 Geplante Features
+
+- [ ] **HTTPS** für WebUI
+- [ ] **Passwort-Schutz** für WebUI
+- [ ] **Backup/Restore** der Konfiguration
+- [ ] **Telegram Benachrichtigungen**
+- [ ] **Grafana Integration**
+- [ ] **Multi-Language** Support (EN/DE)
+- [ ] **Firmware Update** via WebUI Upload
+- [ ] **RESTful API** Dokumentation
+- [ ] **Prometheus Metrics** Export
 
 ---
 
-## 👏 Credits
+## 🤝 Beitragen
 
-**Original Projekt:** [BennoB666](https://github.com/BennoB666) - Danke für das Basis-Projekt!
+Contributions sind willkommen!
 
-**Fork Erweiterungen:** Zusätzliche Features für verbesserte Benutzerfreundlichkeit und Home Assistant Integration.
+1. Fork des Repositories
+2. Feature Branch erstellen (`git checkout -b feature/AmazingFeature`)
+3. Änderungen committen (`git commit -m 'Add some AmazingFeature'`)
+4. Push zum Branch (`git push origin feature/AmazingFeature`)
+5. Pull Request öffnen
+
+---
+
+## 👏 Credits & Danksagung
+
+**Original Projekt:**  
+[BennoB666/BK-G4AT2MQTT](https://github.com/BennoB666/BK-G4AT2MQTT) - Vielen Dank für das Basis-Projekt!
+
+**Fork Maintainer:**  
+Erweitert mit professioneller WebUI, Live-Monitoring, Energy Dashboard Integration und vielen weiteren Features.
+
+**Libraries:**
+- [PubSubClient](https://github.com/knolleary/pubsubclient) - MQTT Client
+- [ESP32Ping](https://github.com/mobizt/ESP32-Ping) - ICMP Ping
+- Arduino ESP32 Core Team
 
 ---
 
 ## 📄 Lizenz
 
-Siehe [LICENSE](LICENSE)
+Siehe [LICENSE](LICENSE) Datei für Details.
+
+---
+
+## 📞 Support
+
+**Issues:** [GitHub Issues](https://github.com/YOUR-USERNAME/BK-G4AT2MQTT/issues)  
+**Diskussionen:** [GitHub Discussions](https://github.com/YOUR-USERNAME/BK-G4AT2MQTT/discussions)
+
+---
+
+**⭐ Gefällt dir das Projekt? Gib einen Stern! ⭐**
