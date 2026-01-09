@@ -23,7 +23,6 @@ Ein leistungsstarkes ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines **
 - [Home Assistant Integration](#-home-assistant-integration)
 - [Konfiguration](#-konfiguration)
 - [OTA Updates](#-ota-updates)
-- [Fehlersuche](#-fehlersuche)
 - [Technische Details](#-technische-details)
 
 ---
@@ -32,12 +31,12 @@ Ein leistungsstarkes ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines **
 
 ### 🎨 Moderne Web-Oberfläche
 
-**Professionelles Glasmorphism Design** mit Dark/Light Mode
+**Glasmorphism Design** mit Dark/Light Mode
 
 - **Dashboard**
   - Live-Anzeige: Gasverbrauch (m³) und Energie (kWh)
   - **Interaktiver Chart.js Verlaufs-Chart**
-    - Professionelle Zeitachsen mit Auto-Skalierung
+    - Zeitachsen mit Auto-Skalierung
     - Zoom & Pan Funktionen
     - Zeitbereiche: 24h, 7 Tage, 30 Tage, Alle
     - Responsive Tooltips mit deutschen Datumsformaten
@@ -102,54 +101,13 @@ Ein leistungsstarkes ESP32 Gateway zum Auslesen der M-Bus Schnittstelle eines **
 - **Separate MQTT Topics** für Volumen und Energie
 - **Persistente Speicherung** von bis zu 50 Messungen
 
-### 🔧 System-Features
-
-- **WiFi Access Point Modus**
-  - Automatisch bei fehlender Konfiguration
-  - SSID: `ESP32-GasZaehler`
-  - Fallback nach 15s bei Verbindungsproblemen
-
-- **NTP Zeit-Synchronisation**
-  - Echte Zeitstempel für alle Messungen
-  - Automatische Sommer-/Winterzeit (Europa)
-  - Server: `de.pool.ntp.org`
-
-- **Persistenter Speicher**
-  - Konfiguration im Flash gespeichert
-  - Messungen-Historie überlebt Neustarts
-  - Automatisches Speichern alle 10 Messungen
-
-- **Memory Management**
-  - Automatische Ringbuffer-Verwaltung
-  - Memory-Leak Schutz
-  - Live Heap Monitoring
-
-- **Fehlerbehandlung**
-  - Detailliertes Error-Tracking
-  - Automatisches Recovery
-  - Statistiken: Timeouts, Parse-Fehler, Verbindungsprobleme
-
-### 🎨 UI/UX Verbesserungen
-
-- **Dark Mode als Standard** (umschaltbar)
-- **Weißer Titel** statt Gradient für bessere Lesbarkeit
-- **Responsive Design** für alle Geräte
-- **CSS Animationen** (Fade-in, Slide-in, Pulse)
-- **Farbcodierte Status-Anzeigen**
-- **Progress Bars** für Erfolgsraten
-- **Reorganisierte UI**: System-Info und Fehlerstatistik in Diagnose-Seite
-- **Chart.js Integration** für professionelle Visualisierung
-- **Accessibility** optimiert
-
----
-
 ## 🔌 Hardware Setup
 
 ### Benötigte Komponenten
 
 - **ESP32 DevKit V1** (empfohlen) oder ESP32-C3
 - **M-Bus Interface** (5V, UART)
-- **Honeywell BK-G4AT** Gaszähler mit M-Bus
+- **Honeywell BK-G4AT** Gaszähler mit M-Bus / ENCODER
 
 ### Verkabelung
 
@@ -264,15 +222,6 @@ Alle Einstellungen editierbar:
 [14:32:47] (1277s) 📡 M-Bus: Verbrauch OK - 1234.56 m³
 [14:32:48] (1278s) 🔗 MQTT: Energie - 12345.6 kWh (Zählerstand: 1234.56 m³, Brennwert: 10.0, Z-Zahl: 1.0)
 ```
-
-Farben:
-- 🚀 **Blau** - System/Boot
-- 📶 **Blau** - WiFi
-- 🔗 **Cyan** - MQTT
-- 📡 **Lila** - M-Bus
-- ✓ **Grün** - Erfolg
-- ❌ **Rot** - Fehler
-- ⚠ **Gelb** - Warnung
 
 **NEU in v2.0:**
 - **Hex-Dump** zeigt erste 32 Bytes der M-Bus Rohdaten
@@ -421,96 +370,6 @@ Leer lassen für Broker ohne Auth.
 
 ---
 
-## 🔄 OTA Updates
-
-### Via PlatformIO (empfohlen)
-
-**Methode 1: Terminal**
-```bash
-pio run -t upload --upload-port 10.10.40.109
-```
-
-**Methode 2: platformio.ini**
-```ini
-[env:esp32dev]
-upload_protocol = espota
-upload_port = 10.10.40.109  ; ESP32 IP-Adresse
-```
-
-Dann einfach:
-```bash
-pio run -t upload
-```
-
-### WebUI Anleitung
-
-Das WebUI zeigt unter **Firmware Update** die aktuelle IP und Befehle an.
-
-**Port:** ArduinoOTA läuft auf Port **3232**
-
----
-
-## 🔍 Fehlersuche
-
-### Problem: Keine WLAN-Verbindung
-
-**Symptom:** LED blinkt schnell (200ms)
-
-**Lösung:**
-1. WLAN Zugangsdaten im WebUI prüfen
-2. Router-Kompatibilität (2.4 GHz, WPA2)
-3. Signal-Stärke im Diagnose-Tool prüfen
-4. Factory Reset: BOOT-Button beim Start gedrückt halten
-
-### Problem: Keine MQTT-Verbindung
-
-**Symptom:** LED blinkt mittel (500ms)
-
-**Lösung:**
-1. MQTT Broker IP & Port prüfen
-2. Firewall-Regeln prüfen (Port 1883)
-3. MQTT Auth Credentials prüfen
-4. Diagnose → MQTT Test ausführen
-
-### Problem: Keine M-Bus Daten
-
-**Symptom:** `M-Bus Timeout` in Logs
-
-**Lösung:**
-1. Verkabelung prüfen (TX↔RX, RX↔TX)
-2. 5V Stromversorgung ausreichend?
-3. M-Bus Interface funktionsfähig?
-4. Gaszähler M-Bus Schnittstelle aktiviert?
-5. Diagnose → M-Bus Stats → Hex-Dump prüfen
-
-### Serial Monitor Logging
-
-```bash
-# PlatformIO Serial Monitor
-pio device monitor -b 115200
-
-# Farbige Ausgabe mit ANSI-Codes
-```
-
-**Wichtige Log-Meldungen:**
-- `ESP32 Boot - System Start` - System gestartet
-- `WiFi verbunden: [IP]` - WLAN OK
-- `MQTT: Verbunden!` - Broker OK
-- `M-Bus: Verbrauch OK` - Messung erfolgreich
-
-### Factory Reset
-
-**BOOT-Button beim Einschalten gedrückt halten:**
-```
-*** CONFIG RESET ERKANNT ***
-Konfiguration gelöscht!
-Starte im Access Point Modus...
-```
-
-Danach neu konfigurieren über AP.
-
----
-
 ## 📊 Technische Details
 
 ### System-Spezifikationen
@@ -626,29 +485,12 @@ lib_deps =
 
 ### 🔮 Geplante Features
 
-- [ ] **HTTPS** für WebUI
-- [ ] **Passwort-Schutz** für WebUI
-- [ ] **Backup/Restore** der Konfiguration
-- [ ] **Telegram Benachrichtigungen**
-- [ ] **Grafana Integration**
 - [ ] **Multi-Language** Support (EN/DE)
 - [ ] **Firmware Update** via WebUI Upload
 - [ ] **RESTful API** Dokumentation
-- [ ] **Prometheus Metrics** Export
 
 ---
 
-## 🤝 Beitragen
-
-Contributions sind willkommen!
-
-1. Fork des Repositories
-2. Feature Branch erstellen (`git checkout -b feature/AmazingFeature`)
-3. Änderungen committen (`git commit -m 'Add some AmazingFeature'`)
-4. Push zum Branch (`git push origin feature/AmazingFeature`)
-5. Pull Request öffnen
-
----
 
 ## 👏 Credits & Danksagung
 
